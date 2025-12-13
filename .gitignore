@@ -1,0 +1,14 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Your sensitive data
+data/
+apikeys.py
+
+# Optional but recommended
+*.log
+*.bak
+.env
+.DS_Store
