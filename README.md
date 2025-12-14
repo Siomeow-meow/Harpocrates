@@ -170,6 +170,8 @@ python main.py
 3. Get Client ID and Client Secret
 4. Use in Discord: `/setup_platform platform:Twitch api_key:CLIENT_ID secret_key:CLIENT_SECRET`
 
+**More Platforms Soon!**
+
 ## ⚙️ Troubleshooting
 
 ### **Common Issues & Solutions**
@@ -204,7 +206,7 @@ The bot stores data in the `data/` directory:
 - `voice_channels.json` - Voice channel configurations
 - `platforms.json` - Platform API configurations
 
-**Backup regularly!** These files are important for persistence.
+**IMPORTANT!** These files are create automatically.
 
 ## 🚨 Advanced Usage
 
