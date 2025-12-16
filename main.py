@@ -2,7 +2,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from apikeys import BOTTOKEN
+from apikeys import BOTTOKEN, SERVERID
 import logging
 import sys
 import asyncio
@@ -95,16 +95,11 @@ class MyBot(commands.Bot):
         
         try:
             # Your specific guild ID
-            guild_id = 1132596556198051950
+            guild_id = SERVERID
             guild = discord.Object(id=guild_id)
-            
-            # Sync global commands first
-            synced_global = await self.tree.sync()
-            self.logger.info(f"✅ Synced {len(synced_global)} global command(s)")
             
             # Clear and sync guild commands
             self.tree.clear_commands(guild=guild)
-            self.tree.copy_global_to(guild=guild)
             synced_guild = await self.tree.sync(guild=guild)
             self.logger.info(f"✅ Synced {len(synced_guild)} command(s) to guild {guild_id}")
             

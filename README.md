@@ -60,6 +60,7 @@ pip install -r requirements.txt
 Create an `apikeys.py` file in the root directory:
 ```python
 BOTTOKEN = "your_discord_bot_token_here"
+SERVERID = your_server_id_here
 ```
 
 4. **Set Up File Structure**

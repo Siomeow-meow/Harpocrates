@@ -104,13 +104,14 @@ class ReactionRole(commands.Cog):
         return description.replace('\\n', '\n')
 
     async def restore_reactions(self):
-        """Restore reactions to messages after bot restart with better error handling"""
+        """Restore missing reactions to messages after bot restart WITHOUT clearing existing ones"""
         if not self.reaction_roles:
             print("ℹ️ No reaction roles to restore")
             return
             
         restored_count = 0
         failed_messages = []
+        skipped_count = 0
         
         for message_id, data in self.reaction_roles.items():
             try:
@@ -139,15 +140,25 @@ class ReactionRole(commands.Cog):
                     failed_messages.append(message_id)
                     continue
                 
-                # Clear existing reactions from bot only
-                try:
-                    await message.clear_reactions()
-                except discord.Forbidden:
-                    print(f"⚠️ Cannot clear reactions for message {message_id}")
-                    # Continue anyway, we'll try to add our reactions
+                # Get current reactions on the message (by bot)
+                current_reactions = []
+                for reaction in message.reactions:
+                    # Check if this reaction was added by the bot
+                    try:
+                        # Fetch users who added this reaction (limit to bot)
+                        async for user in reaction.users(limit=10):
+                            if user.id == self.bot.user.id:
+                                current_reactions.append(str(reaction.emoji))
+                                break
+                    except discord.HTTPException:
+                        continue
                 
-                # Add configured reactions with rate limiting
+                # Add only missing reactions
                 for emoji in reactions.keys():
+                    if emoji in current_reactions:
+                        skipped_count += 1
+                        continue  # Reaction already exists, skip
+                    
                     try:
                         await message.add_reaction(emoji)
                         restored_count += 1
@@ -162,7 +173,7 @@ class ReactionRole(commands.Cog):
         
         # Summary
         success_count = len(self.reaction_roles) - len(failed_messages)
-        print(f"✅ Successfully restored {restored_count} reactions across {success_count}/{len(self.reaction_roles)} messages")
+        print(f"✅ Restored {restored_count} reactions (skipped {skipped_count} already existing) across {success_count}/{len(self.reaction_roles)} messages")
         
         if failed_messages:
             print(f"❌ Failed to restore {len(failed_messages)} messages: {failed_messages}")
