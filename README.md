@@ -77,7 +77,6 @@ discord-bot/
 │   └── platform_setup.py
 ├── data/           # Auto-created for config storage
 ├── main.py
-├── nuclear_cleanup.py
 ├── requirements.txt
 └── apikeys.py     # Your API keys
 ```
