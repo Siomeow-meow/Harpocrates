@@ -19,6 +19,7 @@ def get_platform_instance(bot, platform: str):
 
 
 async def build_platforms_embed(bot, guild_id: str) -> discord.Embed:
+    """Same content /list_platforms used to show, reused by the panel + Refresh button."""
     configured = []
 
     if bot.youtube_platform and bot.youtube_platform.is_configured(guild_id):
@@ -30,7 +31,7 @@ async def build_platforms_embed(bot, guild_id: str) -> discord.Embed:
 
     if configured:
         embed.add_field(name=f"Active Platforms ({len(configured)})",
-                         value="\n".join(configured), inline=False)
+                        value="\n".join(configured), inline=False)
     else:
         embed.add_field(name="Active Platforms", value="*None configured yet*", inline=False)
 
@@ -89,7 +90,6 @@ class PlatformSetupModal(discord.ui.Modal, title="Platform Setup"):
             if self.platform not in self.bot.configured_platforms[guild_id]:
                 self.bot.configured_platforms[guild_id].append(self.platform)
 
-
             if self.dashboard_message:
                 try:
                     embed = await build_platforms_embed(self.bot, guild_id)
@@ -104,7 +104,7 @@ class PlatformDashboard(discord.ui.View):
         self.bot = bot
         self.guild_id = guild_id
         self.selected_platform = None
-        self.message: discord.Message = None
+        self.message: discord.Message = None  # set after sending, so buttons can refresh it
 
     @discord.ui.select(placeholder="Choose a platform...", options=PLATFORM_OPTIONS)
     async def platform_select(self, interaction: discord.Interaction, select: discord.ui.Select):
