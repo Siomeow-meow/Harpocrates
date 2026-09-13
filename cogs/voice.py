@@ -2,11 +2,10 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncio
-import json
-import os
 import time
+from db import load_blob, save_blob
 
-VOICE_CHANNELS_FILE = "data/voice_channels.json"
+COLLECTION = "voice_channels"
 
 # Discord rate-limits channel renames (~2 per 10 min per channel), so auto
 # rename on presence changes needs a cooldown or it will silently 429.
@@ -15,21 +14,12 @@ RENAME_COOLDOWN_SECONDS = 300  # 5 minutes between auto-renames of the same chan
 
 def get_activity_display(activities):
     """Return an (emoji, text) tuple describing the first meaningful activity,
-    or (None, None) if there isn't one.
-
-    IMPORTANT: activities are only populated via the gateway PRESENCE_UPDATE
-    event, which requires Intents.presences (and the "Presence Intent" toggle
-    enabled in the Discord Developer Portal for the bot). REST calls like
-    guild.fetch_member() never include activity/presence data, no matter how
-    "fresh" the fetch is - so don't rely on fetch_member() to get activities.
-    """
+    or (None, None) if there isn't one."""
     if not activities:
         return None, None
 
     for activity in activities:
         if isinstance(activity, discord.Spotify):
-            # Spotify activities are always "listening" type but carry richer
-            # metadata (title + artist) than a generic listening activity.
             artist = activity.artists[0] if getattr(activity, "artists", None) else None
             text = f"{activity.title} - {artist}" if artist else activity.title
             return "🎵", text
@@ -52,12 +42,11 @@ def get_activity_display(activities):
 
 
 def format_activity_channel_name(activities, fallback: str) -> str:
-    """Build a Discord-safe (<=32 char) channel name from a member's activity,
-    falling back to `fallback` (e.g. "<name>'s channel") if there's none."""
     emoji, text = get_activity_display(activities)
     if not text:
         return fallback[:32]
     return f"{emoji} {text}"[:32]
+
 
 class ChannelSettings(discord.ui.Select):
     def __init__(self, channel, member):
@@ -70,7 +59,7 @@ class ChannelSettings(discord.ui.Select):
         super().__init__(placeholder="Change channel settings...", options=options)
         self.channel = channel
         self.member = member
-    
+
     async def callback(self, interaction: discord.Interaction):
         if self.values[0] == "Name":
             modal = ChannelNameModal(self.channel)
@@ -83,7 +72,7 @@ class ChannelSettings(discord.ui.Select):
             await interaction.response.send_modal(modal)
         elif self.values[0] == "Auto Status":
             await self.toggle_auto_status(interaction)
-        
+
         await interaction.followup.edit_message(interaction.message.id, view=ControlView(self.channel, self.member))
 
     async def toggle_auto_status(self, interaction: discord.Interaction):
@@ -105,6 +94,7 @@ class ChannelSettings(discord.ui.Select):
             ephemeral=True
         )
 
+
 class ChannelNameModal(discord.ui.Modal, title="Change Channel Name"):
     def __init__(self, channel):
         super().__init__()
@@ -115,10 +105,11 @@ class ChannelNameModal(discord.ui.Modal, title="Change Channel Name"):
             max_length=100
         )
         self.add_item(self.new_name)
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         await self.channel.edit(name=self.new_name.value)
         await interaction.response.send_message(f"✅ Channel renamed to {self.new_name.value}", ephemeral=True)
+
 
 class ChannelStatusModal(discord.ui.Modal, title="Set Channel Status"):
     def __init__(self, channel):
@@ -132,12 +123,12 @@ class ChannelStatusModal(discord.ui.Modal, title="Set Channel Status"):
             required=False
         )
         self.add_item(self.new_status)
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         try:
             status_text = self.new_status.value.strip() if self.new_status.value else None
             await self.channel.edit(status=status_text)
-            
+
             if status_text:
                 await interaction.response.send_message(
                     f"✅ Channel status set to:\n*{status_text}*",
@@ -159,6 +150,7 @@ class ChannelStatusModal(discord.ui.Modal, title="Set Channel Status"):
                 ephemeral=True
             )
 
+
 class ChannelLimitModal(discord.ui.Modal, title="Change User Limit"):
     def __init__(self, channel):
         super().__init__()
@@ -170,7 +162,7 @@ class ChannelLimitModal(discord.ui.Modal, title="Change User Limit"):
             min_length=1
         )
         self.add_item(self.new_limit)
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         try:
             limit = int(self.new_limit.value)
@@ -197,6 +189,7 @@ class ChannelLimitModal(discord.ui.Modal, title="Change User Limit"):
                 ephemeral=True
             )
 
+
 class PermissionSettings(discord.ui.Select):
     def __init__(self, channel, creator):
         options = [
@@ -209,12 +202,12 @@ class PermissionSettings(discord.ui.Select):
         super().__init__(placeholder="Change permission settings...", options=options)
         self.channel = channel
         self.creator = creator
-    
+
     async def callback(self, interaction: discord.Interaction):
         if interaction.user != self.creator:
             await interaction.response.send_message("❌ Only the channel creator can modify permissions", ephemeral=True)
             return
-            
+
         if self.values[0] == "Lock":
             await self.lock_channel(interaction)
         elif self.values[0] == "Unlock":
@@ -225,61 +218,57 @@ class PermissionSettings(discord.ui.Select):
             await self.ghost_channel(interaction)
         elif self.values[0] == "Unghost":
             await self.unghost_channel(interaction)
-        
+
         await interaction.followup.edit_message(interaction.message.id, view=ControlView(self.channel, interaction.user))
-    
+
     async def lock_channel(self, interaction):
-        # Check if channel is already locked
         current_perms = self.channel.overwrites_for(interaction.guild.default_role)
         if current_perms.connect is False:
             await interaction.response.send_message("🔒 Channel is already locked!", ephemeral=True)
             return
-        
+
         overwrite = discord.PermissionOverwrite()
         overwrite.connect = False
         await self.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
         await interaction.response.send_message("🔒 Channel locked - only you can join!", ephemeral=True)
-    
+
     async def unlock_channel(self, interaction):
-        # Check if channel is already unlocked
         current_perms = self.channel.overwrites_for(interaction.guild.default_role)
         if current_perms.connect is not False:
             await interaction.response.send_message("🔓 Channel is already unlocked!", ephemeral=True)
             return
-        
+
         overwrite = discord.PermissionOverwrite()
         overwrite.connect = True
         await self.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
         await interaction.response.send_message("🔓 Channel unlocked - anyone can join!", ephemeral=True)
-    
+
     async def ghost_channel(self, interaction):
-        # Check if channel is already ghosted
         current_perms = self.channel.overwrites_for(interaction.guild.default_role)
         if current_perms.view_channel is False:
             await interaction.response.send_message("👻 Channel is already hidden!", ephemeral=True)
             return
-        
+
         overwrite = discord.PermissionOverwrite()
         overwrite.view_channel = False
         await self.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
         await interaction.response.send_message("👻 Channel is now hidden from others!", ephemeral=True)
-    
+
     async def unghost_channel(self, interaction):
-        # Check if channel is already visible
         current_perms = self.channel.overwrites_for(interaction.guild.default_role)
         if current_perms.view_channel is not False:
             await interaction.response.send_message("👻 Channel is already visible!", ephemeral=True)
             return
-        
+
         overwrite = discord.PermissionOverwrite()
         overwrite.view_channel = True
         await self.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
         await interaction.response.send_message("👻 Channel is now visible to everyone!", ephemeral=True)
-    
+
     async def reject_user(self, interaction):
-        # Show a modal to enter username
         modal = RejectUserModal(self.channel, interaction.user)
         await interaction.response.send_modal(modal)
+
 
 class RejectUserModal(discord.ui.Modal, title="Reject User"):
     def __init__(self, channel, creator):
@@ -292,66 +281,60 @@ class RejectUserModal(discord.ui.Modal, title="Reject User"):
             max_length=100
         )
         self.add_item(self.username)
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Try to find the user
             user_input = self.username.value.strip()
-            
-            # Try to get by ID first
+
             if user_input.isdigit():
                 user = await interaction.client.fetch_user(int(user_input))
             else:
-                # Search by name
                 user = None
                 for member in interaction.guild.members:
                     if str(member) == user_input or member.name == user_input:
                         user = member
                         break
-                
+
                 if not user:
-                    # Try to find by nickname
                     for member in interaction.guild.members:
                         if member.nick == user_input:
                             user = member
                             break
-            
+
             if not user:
                 await interaction.response.send_message(
                     f"❌ Could not find user '{self.username.value}'. Please use username#tag or user ID.",
                     ephemeral=True
                 )
                 return
-            
-            # Kick the user from the channel if they're in it
+
             if user in self.channel.members:
-                # Find a different voice channel to move them to
                 default_channel = None
                 for channel in interaction.guild.voice_channels:
                     if channel.id != self.channel.id:
                         default_channel = channel
                         break
-                
+
                 if default_channel:
                     await user.move_to(default_channel)
                 else:
-                    await user.move_to(None)  # Disconnect them
-            
-            # Remove their permissions to reconnect
+                    await user.move_to(None)
+
             overwrite = discord.PermissionOverwrite()
             overwrite.connect = False
             await self.channel.set_permissions(user, overwrite=overwrite)
-            
+
             await interaction.response.send_message(
                 f"✅ {user.mention} has been rejected from your channel!",
                 ephemeral=True
             )
-            
+
         except Exception as e:
             await interaction.response.send_message(
                 f"❌ An error occurred: {str(e)}",
                 ephemeral=True
             )
+
 
 class ControlView(discord.ui.View):
     def __init__(self, channel, creator):
@@ -359,15 +342,15 @@ class ControlView(discord.ui.View):
         self.add_item(ChannelSettings(channel, creator))
         self.add_item(PermissionSettings(channel, creator))
 
+
 class Voice(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.temp_channels_config = {}
         self.temp_channels = {}
-        self._last_rename = {}  # channel_id -> timestamp of last auto-rename
+        self._last_rename = {}
         self.load_config()
 
-        # Presence Intent sanity check - without this, activities are always empty.
         if not bot.intents.presences:
             print(
                 "[WARNING] Intents.presences is not enabled. Auto Status "
@@ -383,79 +366,96 @@ class Voice(commands.Cog):
 
     def save_temp_channels(self):
         """Persist per-channel runtime state (e.g. auto_status toggle)."""
-        # Kept in-memory only by default since temp channels don't survive a
-        # restart anyway; hook here if you want to persist across restarts.
         pass
 
     def load_config(self):
-        """Load configuration from JSON file"""
+        """Load configuration from MongoDB.
+
+        Shape per guild:
+        {
+            "creators": {channel_id (int): {"name": str, "editable": bool}},
+            "order": [channel_id, ...]
+        }
+        No category_id is stored anymore because each creator channel can live
+        in ANY category and temp channels spawn in that same category.
+        """
         try:
-            # Create data directory if it doesn't exist
-            os.makedirs(os.path.dirname(VOICE_CHANNELS_FILE), exist_ok=True)
-            
-            if os.path.exists(VOICE_CHANNELS_FILE):
-                with open(VOICE_CHANNELS_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.temp_channels_config = {int(k): v for k, v in data.items()}
-                    print(f"[INFO] Loaded voice channel config for {len(self.temp_channels_config)} guilds")
-            else:
-                print(f"[INFO] No config file found at {VOICE_CHANNELS_FILE}")
+            data = load_blob(COLLECTION)
+            configs = {}
+            for guild_id, config in data.items():
+                creators = {int(cid): c for cid, c in config.get("creators", {}).items()}
+                order = [int(cid) for cid in config.get("order", list(creators.keys()))]
+                configs[int(guild_id)] = {
+                    "creators": creators,
+                    "order": order,
+                }
+            self.temp_channels_config = configs
+            print(f"[INFO] Loaded voice channel config for {len(self.temp_channels_config)} guilds")
         except Exception as e:
             print(f"[ERROR] Failed to load config: {e}")
             self.temp_channels_config = {}
 
     def save_config(self):
-        """Save configuration to JSON file"""
+        """Save configuration to MongoDB"""
         try:
-            # Create data directory if it doesn't exist
-            os.makedirs(os.path.dirname(VOICE_CHANNELS_FILE), exist_ok=True)
-            
-            with open(VOICE_CHANNELS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.temp_channels_config, f, indent=4, ensure_ascii=False)
-            print(f"[INFO] Saved voice channel config for {len(self.temp_channels_config)} guilds")
+            json_data = {}
+            for guild_id, config in self.temp_channels_config.items():
+                json_data[str(guild_id)] = {
+                    "creators": {str(cid): c for cid, c in config.get("creators", {}).items()},
+                    "order": [str(cid) for cid in config.get("order", [])],
+                }
+            success = save_blob(COLLECTION, json_data)
+            if success:
+                print(f"[INFO] Saved voice channel config for {len(self.temp_channels_config)} guilds")
+            else:
+                print("[ERROR] Failed to save config")
         except Exception as e:
             print(f"[ERROR] Failed to save config: {e}")
 
-    async def find_existing_creator_channel(self, guild):
-        """Check if a Join To Create channel already exists in the guild"""
+    async def find_existing_creator_channel(self, guild, name: str):
+        """Look for an existing 'Join to Create' channel that matches the
+        given name (case-insensitive, trimmed). Used so re-running /setup_vc
+        with the same name doesn't create duplicates."""
+        target = name.strip().lower()
         for channel in guild.voice_channels:
-            if channel.name.lower().startswith(("➕", "+")) and "join to create" in channel.name.lower():
+            if channel.name.strip().lower() == target:
                 return channel
         return None
 
-    @app_commands.command(name="setup_vc", description="Setup the temporary voice channel system")
+    @app_commands.command(name="setup_vc", description="Setup a temporary voice channel system")
     @app_commands.describe(
         name="Name for the 'Join to Create' voice channel",
         editable="Whether settings should be editable"
     )
     @app_commands.default_permissions(administrator=True)
-    async def setup_voice(self, interaction: discord.Interaction, name: str, editable: bool = True):
+    async def setup_voice(self, interaction: discord.Interaction, name: str = "➕ | Join To Create", editable: bool = True):
         name = name.strip()[:100]
         if not name:
             await interaction.response.send_message("❌ Channel name can't be empty.", ephemeral=True)
             return
 
-        # Only auto-detect a pre-existing creator channel when the caller
-        # didn't ask for a specific custom name - otherwise honor the name
-        # they gave and create a fresh channel for it.
-        existing_channel = None
-        if name == "➕ | Join to Create":
-            existing_channel = await self.find_existing_creator_channel(interaction.guild)
+        guild = interaction.guild
+        config = self.temp_channels_config.setdefault(guild.id, {"creators": {}, "order": []})
+        creators = config["creators"]
 
+        # Don't create a duplicate creator channel with the same name.
+        for cid, data in creators.items():
+            existing = guild.get_channel(cid)
+            if existing and data.get("name", "").lower() == name.lower():
+                await interaction.response.send_message(
+                    f"❌ A Join To Create channel named **{name}** already exists: {existing.mention}",
+                    ephemeral=True
+                )
+                return
+
+        # Auto-detect a pre-existing channel with that name and adopt it,
+        # instead of creating a duplicate. This mirrors the JSON version's
+        # "reuse if present" behavior.
+        existing_channel = await self.find_existing_creator_channel(guild, name)
         if existing_channel:
-            category = existing_channel.category
-            if not category:
-                category = await interaction.guild.create_category("Temporary Channels")
-                await existing_channel.edit(category=category)
-            
-            self.temp_channels_config[interaction.guild.id] = {
-                "editable": editable,
-                "category_id": category.id,
-                "creator_channel_id": existing_channel.id,
-                "creator_channel_name": existing_channel.name
-            }
-            self.save_config()  # Save to file
-            
+            creators[existing_channel.id] = {"name": existing_channel.name, "editable": editable}
+            config["order"].append(existing_channel.id)
+            self.save_config()
             await interaction.response.send_message(
                 f"✅ Using existing Join To Create channel: {existing_channel.mention}\n"
                 "You can move this channel anywhere and it will still work.",
@@ -463,107 +463,82 @@ class Voice(commands.Cog):
             )
             return
 
-        category = await interaction.guild.create_category("Temporary Channels")
-        vc = await category.create_voice_channel(name)
-        
-        self.temp_channels_config[interaction.guild.id] = {
-            "editable": editable,
-            "category_id": category.id,
-            "creator_channel_id": vc.id,
-            "creator_channel_name": name
-        }
-        self.save_config()  # Save to file
-        
+        # Create a fresh creator channel. No forced category - it goes to
+        # the top level, and admins can drag it into any category they like.
+        vc = await guild.create_voice_channel(name)
+        creators[vc.id] = {"name": name, "editable": editable}
+        config["order"].append(vc.id)
+        self.save_config()
+
         await interaction.response.send_message(
-            "✅ Temporary channel system setup complete!\n"
-            f"Join To Create channel: {vc.mention}\n"
-            "You can move this channel anywhere and it will still work.",
+            "✅ Join To Create channel ready!\n"
+            f"Channel: {vc.mention}\n"
+            "You can move this channel anywhere (any category) and it will "
+            "still work. Run `/setup_vc` again with a different name to add "
+            "more creators.",
             ephemeral=True
         )
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Verify all configured channels still exist when bot starts"""
+        """Prune config entries whose Discord objects are gone. Never
+        recreates or deletes anything - if you move or delete a channel
+        yourself, it stays exactly how you left it."""
         print(f"[INFO] Bot is ready. Verifying {len(self.temp_channels_config)} guild configurations...")
-        
+
         for guild_id, config in list(self.temp_channels_config.items()):
             guild = self.bot.get_guild(guild_id)
             if not guild:
                 print(f"[WARNING] Guild {guild_id} not found, removing from config")
                 del self.temp_channels_config[guild_id]
                 continue
-            
-            # Check if creator channel exists - recreate it using the saved
-            # name/category instead of dropping the whole config if it's gone
-            creator_channel = guild.get_channel(config.get("creator_channel_id"))
-            category = guild.get_channel(config.get("category_id"))
 
-            if not creator_channel:
-                try:
-                    if not category:
-                        category = await guild.create_category("Temporary Channels")
-                        config["category_id"] = category.id
-                    creator_name = config.get("creator_channel_name", "➕ | Join to Create")
-                    creator_channel = await category.create_voice_channel(creator_name)
-                    config["creator_channel_id"] = creator_channel.id
-                    print(f"[INFO] Recreated missing creator channel for guild {guild.name}")
-                except Exception as e:
-                    print(f"[ERROR] Failed to recreate creator channel for guild {guild.name}: {e}")
-                    del self.temp_channels_config[guild_id]
-                    continue
-            
-            # Check if category exists
-            if not category:
-                # Create new category if missing
-                try:
-                    category = await guild.create_category("Temporary Channels")
-                    await creator_channel.edit(category=category)
-                    config["category_id"] = category.id
-                    print(f"[INFO] Recreated category for guild {guild.name}")
-                except Exception as e:
-                    print(f"[ERROR] Failed to recreate category for guild {guild.name}: {e}")
-                    del self.temp_channels_config[guild_id]
-                    continue
-            
-            print(f"[INFO] Verified configuration for guild: {guild.name}")
-        
-        # Save any updates to config
-        if self.temp_channels_config:
-            self.save_config()
+            creators = config.get("creators", {})
+            for cid in list(creators.keys()):
+                if not guild.get_channel(cid):
+                    print(f"[INFO] Creator channel {cid} in guild {guild.name} no longer exists, untracking it")
+                    del creators[cid]
+
+            config["order"] = [cid for cid in config.get("order", []) if cid in creators]
+
+            if not creators:
+                del self.temp_channels_config[guild_id]
+                continue
+
+            print(f"[INFO] Verified {len(creators)} creator channel(s) for guild: {guild.name}")
+
+        self.save_config()
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         guild_config = self.temp_channels_config.get(member.guild.id)
         if not guild_config:
             return
-        
-        # User joined the creator channel
-        if after.channel and after.channel.id == guild_config["creator_channel_id"]:
+
+        creators = guild_config.get("creators", {})
+
+        # User joined one of this guild's creator channels
+        if after.channel and after.channel.id in creators:
             try:
-                # Refresh member data to get current activities
                 member = await member.guild.fetch_member(member.id)
-            except:
-                pass  # Use original member if refresh fails
-            
+            except Exception:
+                pass
+
             creator_channel = after.channel
+            # Temp channel spawns in whatever category the creator channel is
+            # currently in - no forced category.
             category = creator_channel.category
-            
-            if not category:
-                category = await member.guild.create_category("Temporary Channels")
-                await creator_channel.edit(category=category)
-                guild_config["category_id"] = category.id
-                self.save_config()
-            
-            # Set initial channel name based on activity
+
             channel_name = format_activity_channel_name(member.activities, f"{member.name}'s channel")
-            
-            temp_channel = await category.create_voice_channel(
+
+            temp_channel = await member.guild.create_voice_channel(
                 channel_name,
+                category=category,
                 user_limit=0
             )
-            
+
             await member.move_to(temp_channel)
-            
+
             embed = discord.Embed(
                 title="Temporary Voice Channel Controls",
                 description="Use the dropdown menus below to manage your channel.",
@@ -579,9 +554,9 @@ class Voice(commands.Cog):
                 value="• Lock/unlock\n• Reject users\n• Ghost/Unghost",
                 inline=True
             )
-            
+
             view = ControlView(temp_channel, member)
-            
+
             try:
                 message = await temp_channel.send(embed=embed, view=view)
                 self.temp_channels[temp_channel.id] = {
@@ -593,51 +568,40 @@ class Voice(commands.Cog):
                 self._last_rename[temp_channel.id] = time.time()
             except Exception as e:
                 print(f"[ERROR] Failed to send control message: {e}")
-        
-        # Clean up empty channels - FIXED VERSION with safe deletion
+
+        # Clean up empty temp channels
         channel_ids_to_check = list(self.temp_channels.keys())
-        
+
         for channel_id in channel_ids_to_check:
             channel = member.guild.get_channel(channel_id)
-            
-            # If channel doesn't exist or is empty
+
             if not channel or len(channel.members) == 0:
                 try:
-                    # Get data before potentially removing from dictionary
                     data = self.temp_channels.get(channel_id)
                     if not data:
-                        # If no data, just remove the key and continue
                         self.temp_channels.pop(channel_id, None)
                         continue
-                    
-                    # Try to delete the control message if channel exists
+
                     if "control_message_id" in data and channel:
                         try:
                             message = await channel.fetch_message(data["control_message_id"])
                             await message.delete()
                         except (discord.NotFound, discord.HTTPException):
-                            pass  # Message might already be deleted
-                    
-                    # Delete the channel if it exists
+                            pass
+
                     if channel:
                         await channel.delete()
-                    
+
                 except discord.NotFound:
-                    # Channel already deleted
                     pass
                 except Exception as e:
                     print(f"[ERROR] Failed to clean up channel {channel_id}: {e}")
                 finally:
-                    # Always remove from dictionary safely
                     self.temp_channels.pop(channel_id, None)
                     self._last_rename.pop(channel_id, None)
 
     @commands.Cog.listener()
     async def on_presence_update(self, before, after):
-        """Auto-rename a temp channel when its creator's activity changes,
-        if that creator has Auto Status enabled - subject to a cooldown to
-        stay under Discord's channel-rename rate limit."""
-        # Find a temp channel this member owns and currently sits in
         entry = None
         channel_id = None
         for cid, data in self.temp_channels.items():
@@ -652,7 +616,6 @@ class Voice(commands.Cog):
         if not channel or after not in channel.members:
             return
 
-        # Only bother if activities actually changed
         before_display = get_activity_display(before.activities)
         after_display = get_activity_display(after.activities)
         if before_display == after_display:
@@ -660,7 +623,7 @@ class Voice(commands.Cog):
 
         last = self._last_rename.get(channel_id, 0)
         if time.time() - last < RENAME_COOLDOWN_SECONDS:
-            return  # cooldown active, skip to avoid rate limiting
+            return
 
         new_name = format_activity_channel_name(after.activities, f"{after.name}'s channel")
         if new_name == channel.name:
@@ -673,23 +636,56 @@ class Voice(commands.Cog):
         except discord.HTTPException as e:
             print(f"[ERROR] Auto-rename failed for channel {channel_id}: {e}")
 
-    @app_commands.command(name="remove_vc", description="Remove the temporary voice channel system")
+    @app_commands.command(name="remove_vc", description="Remove the most recently created Join To Create channel")
     @app_commands.default_permissions(administrator=True)
     async def remove_voice(self, interaction: discord.Interaction):
-        """Command to remove the VC system from a guild"""
-        if interaction.guild.id in self.temp_channels_config:
-            del self.temp_channels_config[interaction.guild.id]
-            self.save_config()
-            await interaction.response.send_message(
-                "✅ Temporary voice channel system removed.\n"
-                "Note: Existing Join To Create channels won't be deleted automatically.",
-                ephemeral=True
-            )
-        else:
+        """Removes exactly one Join To Create channel per call, LIFO: the
+        last one you created is the first one this removes."""
+        config = self.temp_channels_config.get(interaction.guild.id)
+        order = config.get("order", []) if config else []
+        if not config or not order:
             await interaction.response.send_message(
                 "❌ No temporary voice channel system is configured for this server.",
                 ephemeral=True
             )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        creators = config.get("creators", {})
+        cid = order.pop()
+        creators.pop(cid, None)
+
+        channel = interaction.guild.get_channel(cid)
+        deleted_channel = False
+        failed = False
+        if channel:
+            try:
+                await channel.delete(reason="Removed via /remove_vc (LIFO)")
+                deleted_channel = True
+            except (discord.Forbidden, discord.HTTPException):
+                failed = True
+
+        if not order:
+            del self.temp_channels_config[interaction.guild.id]
+        else:
+            config["creators"] = creators
+            config["order"] = order
+
+        self.save_config()
+
+        if not deleted_channel:
+            msg = "✅ Untracked it. It looks like it was already deleted on Discord." if not failed else \
+                  "⚠️ Untracked it, but I don't have permission to delete it on Discord."
+            await interaction.followup.send(msg, ephemeral=True)
+            return
+
+        remaining = len(order)
+        summary = "✅ Removed its Join To Create channel."
+        if remaining:
+            summary += f" {remaining} other Join To Create channel(s) still remain."
+        await interaction.followup.send(summary, ephemeral=True)
+
 
 async def setup(bot):
     await bot.add_cog(Voice(bot))

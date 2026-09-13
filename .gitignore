@@ -5,7 +5,7 @@ __pycache__/
 
 # Your sensitive data
 data/
-apikeys.py
+apikeys.env
 
 # Optional but recommended
 *.log

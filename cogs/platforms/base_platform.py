@@ -1,10 +1,11 @@
 # cogs/platforms/base_platform.py
 import discord
 from discord import app_commands
-import json
-import os
 from abc import ABC, abstractmethod
 from datetime import datetime
+from db import load_blob, save_blob
+
+COLLECTION = "platforms"
 
 class BasePlatform(ABC):
     """Abstract base class for all platform integrations - NOT a Cog"""
@@ -12,30 +13,21 @@ class BasePlatform(ABC):
     def __init__(self, bot, platform_name):
         self.bot = bot
         self.platform_name = platform_name.lower()
-        self.platforms_file = "data/platforms.json"
         self.platforms = self._load_platforms()
     
     def _load_platforms(self):
-        """Load platform configurations"""
-        if os.path.exists(self.platforms_file):
-            try:
-                with open(self.platforms_file, 'r') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, ValueError):
-                print(f"⚠️ Error loading {self.platforms_file}, creating new file")
-                return {}
-        
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(self.platforms_file), exist_ok=True)
-        return {}
+        """Load platform configurations from MongoDB"""
+        try:
+            return load_blob(COLLECTION)
+        except Exception as e:
+            print(f"⚠️ Error loading platforms from MongoDB: {e}")
+            return {}
     
     def _save_platforms(self):
-        """Save platform configurations"""
+        """Save platform configurations to MongoDB"""
         try:
-            os.makedirs(os.path.dirname(self.platforms_file), exist_ok=True)
-            with open(self.platforms_file, 'w') as f:
-                json.dump(self.platforms, f, indent=4)
-            print(f"✅ Saved platforms to {self.platforms_file}")
+            success = save_blob(COLLECTION, self.platforms)
+            print(f"{'✅ Saved platforms to MongoDB' if success else '❌ Failed to save platforms'}")
         except Exception as e:
             print(f"❌ Error saving platforms: {e}")
     

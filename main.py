@@ -1,11 +1,18 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from apikeys import BOTTOKEN, SERVERID
 import logging
 import sys
 import asyncio
 import os
+from dotenv import load_dotenv
+
+load_dotenv("apikeys.env")
+
+BOTTOKEN = os.environ["BOTTOKEN"]
+SERVERID = int(os.environ["SERVERID"])
+
+import db
 
 # Prevent __pycache__ generation
 sys.dont_write_bytecode = True
@@ -27,10 +34,7 @@ class MyBot(commands.Bot):
         self.twitch_platform = None
         self.synced_guilds = set()
 
-        # Create data folder if it doesn't exist
-        if not os.path.exists('data'):
-            os.makedirs('data')
-            self.logger.info("Created data folder")
+        # Data now lives in MongoDB (see db.py) — no local data/ folder needed.
 
     def _setup_logger(self):
         logger = logging.getLogger('discord.bot')
@@ -50,9 +54,14 @@ class MyBot(commands.Bot):
         """Setup all cogs when bot starts"""
         self.logger.info("Starting bot setup...")
 
-        # ─────────────────────────────────────────────
-        # 1. Load platform modules FIRST (not cogs)
-        # ─────────────────────────────────────────────
+        try:
+            db.ping()
+            self.logger.info("Connected to MongoDB")
+        except Exception as e:
+            self.logger.error(f"Could not connect to MongoDB: {e}")
+            raise
+
+        # 1. Loads platform modules
         self.logger.info("Loading platform modules...")
 
         try:
@@ -69,9 +78,7 @@ class MyBot(commands.Bot):
         except Exception as e:
             self.logger.error(f"❌ Failed to load Twitch platform: {e}")
 
-        # ─────────────────────────────────────────────
-        # 2. Load all cogs
-        # ─────────────────────────────────────────────
+        # 2. Loads all cogs
         cogs_to_load = [
             'voice',
             'help',
@@ -87,14 +94,8 @@ class MyBot(commands.Bot):
             except Exception as e:
                 self.logger.error(f"❌ Failed to load cog {cog_name}: {e}")
 
-        # ─────────────────────────────────────────────
-        # 3. Register platforms
-        # ─────────────────────────────────────────────
         await self.register_platforms()
 
-        # ─────────────────────────────────────────────
-        # 4. Sync slash commands (SAFE)
-        # ─────────────────────────────────────────────
         await self.auto_sync_commands()
 
         self.logger.info("=" * 50)
@@ -112,9 +113,6 @@ class MyBot(commands.Bot):
         try:
             guild = discord.Object(id=guild_id)
 
-            # 🔥 IMPORTANT:
-            # Copy all global commands registered by cogs
-            # into the guild before syncing
             self.tree.copy_global_to(guild=guild)
 
             synced = await self.tree.sync(guild=guild)

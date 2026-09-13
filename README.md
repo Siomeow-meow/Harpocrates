@@ -5,41 +5,18 @@ A powerful, feature-rich Discord bot for tracking content creators, managing voi
 ## ✨ Features
 
 ### **🎥 Content Creator Tracking**
-- **YouTube & Twitch Support**: Get notified when creators upload new content or go live
-- **Auto-Role Assignment**: Automatically assign roles to users who follow specific creators
-- **Multi-Channel Support**: Send notifications to different channels for different creators
-- **Manual Checking**: Instantly check and post the latest content from any creator
-
-### **🔊 Smart Voice Channels**
-- **Join-to-Create System**: Join a designated channel to create your own temporary voice channel
-- **Dynamic Naming**: Auto-name channels based on your current game/activity
-- **Custom Controls**: Rename, lock/unlock, set user limits, and manage permissions
-- **Auto-Cleanup**: Empty channels are automatically deleted
-
+### **🔊 Join-to-Create Voice Channels**
 ### **🎭 Reaction Roles**
-- **Easy Setup**: Create reaction role messages with a single command
-- **Multiple Types**: Normal, Unique, and Verification message types
-- **Role Management**: Add, remove, and edit roles easily
-- **Persistent**: Roles survive bot restarts
-- **Verification System**: Simple user verification through reactions
-
 ### **🛠️ Platform Integration**
-- **Universal Setup**: Configure YouTube and Twitch with simple commands
-- **API Management**: Securely store and manage platform credentials
-- **Multi-Server Support**: Different configurations for different servers
-- **Easy Removal**: Remove platform configurations when no longer needed
-
 ### **📚 Comprehensive Help System**
-- **Category Organization**: Commands organized by functionality
-- **Dropdown Interface**: Easy navigation through command categories
-- **Detailed Descriptions**: Clear explanations for every command
-- **Ephemeral Responses**: Private help to keep channels clean
+
 
 ## 📋 Installation
 
 ### Prerequisites
 - Python 3.8 or higher
 - Discord Bot Token
+- A MongoDB database (e.g. a free [MongoDB Atlas](https://www.mongodb.com/atlas) cluster)
 - YouTube Data API v3 Key (for YouTube features)
 - Twitch Client ID & Secret (for Twitch features)
 
@@ -57,11 +34,16 @@ pip install -r requirements.txt
 ```
 
 3. **Configure API Keys**
-Create an `apikeys.py` file in the root directory:
-```python
-BOTTOKEN = "your_discord_bot_token_here"
-SERVERID = your_server_id_here
+Create an `apikeys.env` file in the root directory:
+```env
+BOTTOKEN=your_discord_bot_token_here
+SERVERID=your_server_id_here
+MONGO_URI=mongodb+srv://<username>:<db_password>@your-cluster.mongodb.net/?retryWrites=true&w=majority
+MONGO_PASSWORD=your_mongodb_password_here
 ```
+- `MONGO_URI` is the connection string from your MongoDB provider. If it contains the literal `<db_password>` placeholder, `db.py` will substitute in `MONGO_PASSWORD` automatically.
+- `MONGO_PASSWORD` can be omitted if your `MONGO_URI` already has the real password baked in.
+- All of these values can also be set as real environment variables instead (useful for hosting platforms like Railway/Heroku) — the environment always takes precedence over `apikeys.env`.
 
 4. **Set Up File Structure**
 ```
@@ -75,22 +57,25 @@ discord-bot/
 │   ├── reaction-role.py
 │   ├── creator-videos.py
 │   └── platform_setup.py
-├── data/           # Auto-created for config storage
+├── db.py           # Shared MongoDB connection/helpers
 ├── main.py
-├── nuclear_cleanup.py
 ├── requirements.txt
-└── apikeys.py     # Your API keys
+└── apikeys.env     # Your API keys & MongoDB credentials
 ```
 
 5. **Invite the Bot to Your Server**
 Use the Discord Developer Portal to generate an invite link with these permissions:
-- `Manage Roles`
-- `Manage Channels`
-- `Send Messages`
-- `Read Messages`
-- `Add Reactions`
-- `Move Members`
-- `Connect` (Voice)
+- `Manage Roles` - auto-role assignment (creator follows, reaction roles, verification)
+- `Manage Channels` - creating/editing/deleting temporary voice channels
+- `Move Members` - moving users into and out of their temporary voice channel
+- `Send Messages` - responding to commands and posting notifications
+- `Embed Links` - voice control panels and other embeds
+- `Add Reactions` - setting up reaction role messages
+- `Read Message History` - finding/editing existing reaction-role messages
+- `View Channel` and `Connect` (Voice) - seeing and joining the "Join to Create" channel
+- `Use Application Commands` - slash commands
+
+> ⚠️ **Role hierarchy matters:** the bot's own role must be positioned **above** any role it will assign (reaction roles, follow roles, etc.), or Discord will silently block the assignment even with `Manage Roles` granted.
 
 ## 🚀 Getting Started
 
@@ -102,60 +87,6 @@ python main.py
 
 2. Wait for the bot to fully start (you'll see "Logged in as..." in console)
 
-3. Use these setup commands in your Discord server:
-
-### **Essential Setup Commands**
-| Command | Description | Usage |
-|---------|-------------|-------|
-| `/setup_platform` | Configure YouTube/Twitch | `/setup_platform platform:YouTube api_key:YOUR_API_KEY` |
-| `/setup_vc` | Enable voice channel system | `/setup_vc editable:true` |
-| `/role_create` | Create roles for reaction system | `/role_create name:Gamer color:#00FF00` |
-
-## 📖 Command Reference
-
-### **🎥 Creator Tracking Commands**
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/follow` | Start tracking a creator | `/follow creator:@pewdiepie platform:YouTube user:@user role:@Subscriber` |
-| `/unfollow` | Stop tracking a creator | `/unfollow creator:pewdiepie platform:YouTube` |
-| `/show_creators` | List all tracked creators | `/show_creators` |
-| `/check_creator` | Manually check for new content | `/check_creator creator:shroud platform:Twitch` |
-
-### **🔊 Voice Channel Commands**
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/setup_vc` | Enable temporary voice channels | `/setup_vc editable:true` |
-| `/remove_vc` | Disable voice channel system | `/remove_vc` |
-
-**Voice Channel Controls** (After joining a "Join to Create" channel):
-- **Name**: Rename your channel
-- **Status**: Set a status for your channel
-- **User Limit**: Set maximum users
-- **Gaming**: Auto-name based on your activity
-- **Lock/Unlock**: Control who can join
-- **Ghost/Unghost**: Hide/show your channel
-
-### **🎭 Reaction Role Commands**
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/rr_create` | Create a reaction role message | `/rr_create title:"Get Roles" description:"React below\\nLine break example" message_type:Normal color:#FF0000` |
-| `/rr_add` | Add role to a message | `/rr_add message_id:123456789 emoji:🎮 role:@Gamer` |
-| `/rr_remove` | Remove role from message | `/rr_remove message_id:123456789 emoji:🎮` |
-| `/rr_edit` | Edit an existing message | `/rr_edit message_id:123456789 title:"New Title"` |
-| `/rr_delete` | Delete a reaction role | `/rr_delete message_id:123456789` |
-| `/rr_list` | List all reaction roles | `/rr_list` |
-| `/rr_info` | Get info about a message | `/rr_info message_id:123456789` |
-| `/rr_cleanup` | Clean up invalid configs | `/rr_cleanup` |
-
-### **🛠️ Utility Commands**
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/help` | Show all commands | `/help` |
-| `/list_platforms` | Show configured platforms | `/list_platforms` |
-| `/remove_platform` | Remove platform config | `/remove_platform platform:YouTube` |
-| `/role_create` | Create a new role | `/role_create name:VIP color:#FFD700 hoist:true` |
-| `/role_delete` | Delete a role | `/role_delete role:@VIP` |
-
 ## 🔧 Platform Configuration
 
 ### **YouTube Setup**
@@ -163,13 +94,13 @@ python main.py
 2. Create a new project or select existing
 3. Enable "YouTube Data API v3"
 4. Create credentials (API key)
-5. Use in Discord: `/setup_platform platform:YouTube api_key:YOUR_API_KEY`
+5. Use in Discord: `/platforms`
 
 ### **Twitch Setup**
 1. Go to [Twitch Developer Console](https://dev.twitch.tv/console)
 2. Register your application
 3. Get Client ID and Client Secret
-4. Use in Discord: `/setup_platform platform:Twitch api_key:CLIENT_ID secret_key:CLIENT_SECRET`
+4. Use in Discord: `/platforms`
 
 **More Platforms Soon!**
 
@@ -177,13 +108,10 @@ python main.py
 
 ### **Common Issues & Solutions**
 
-#### **Commands Not Showing Up**
-```bash
-# Run the nuclear cleanup script
-python nuclear_cleanup.py
-# Wait 2-5 minutes
-python main.py
-```
+#### **Bot Won't Start / MongoDB Errors**
+- `❌ MONGO_URI is not set`: add `MONGO_URI` to `apikeys.env` or your environment.
+- `❌ MONGO_PASSWORD is not set`: your `MONGO_URI` still contains the `<db_password>` placeholder, so `MONGO_PASSWORD` must also be set.
+- `Could not connect to MongoDB`: double-check your cluster's IP allowlist (Atlas requires whitelisting the host running the bot, or `0.0.0.0/0` for testing) and that the username/password are correct.
 
 #### **Voice Channels Not Working**
 - Ensure bot has "Manage Channels" permission
@@ -200,14 +128,14 @@ python main.py
 - Check if platform is configured: `/list_platforms`
 - Ensure bot has permission to send messages in target channel
 
-### **Data Files & Backups**
-The bot stores data in the `data/` directory:
-- `reaction_roles.json` - Reaction role configurations
-- `tracked_channels.json` - Creator tracking data
-- `voice_channels.json` - Voice channel configurations
-- `platforms.json` - Platform API configurations
+### **Data Storage & Backups**
+All bot data is stored in MongoDB (see `db.py`) instead of local JSON files. Each cog gets its own collection in the `HarpocratesDB` database, with a single `_id: "config"` document holding that cog's data:
+- `reaction-role` collection - Reaction role configurations
+- `creator-videos` collection - Creator tracking data
+- `voice` collection - Voice channel configurations
+- `platform_setup` collection - Platform API configurations
 
-**IMPORTANT!** These files are create automatically.
+**IMPORTANT!** These collections/documents are created automatically the first time each cog saves data. To back up your bot's data, use your MongoDB provider's export/dump tools (e.g. `mongodump`, or Atlas's built-in backup features) against the `HarpocratesDB` database.
 
 ## 🚨 Advanced Usage
 
@@ -242,19 +170,14 @@ We welcome contributions! This bot is 100% free and open-source.
 ### **Support the Project**
 This bot is completely free to use. If you find it valuable and want to support development:
 
-**PayPal**: [Your PayPal Link Here]
+**PayPal**: [Soon]
+
 
 No payment is required - this is our gift to the Discord community! All features are unlocked and freely available.
 
 ## 📝 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🔗 Links
-
-- **GitHub Repository**: [Link to your repo]
-- **Discord Support Server**: [Your server invite link]
-- **Documentation**: [Link to detailed docs if available]
 
 ## 🎯 Pro Tips
 

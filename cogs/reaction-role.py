@@ -1,967 +1,692 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json
-import os
 import asyncio
-import tempfile
+from db import load_blob, save_blob
 
-REACTION_ROLES_FILE = "data/reaction_roles.json"
+COLLECTION = "reaction_roles"
+
+
+
+def load_reaction_roles():
+    try:
+        data = load_blob(COLLECTION)
+        result = {}
+        for k, v in data.items():
+            try:
+                result[int(k)] = v
+            except ValueError:
+                result[k] = v
+        if not result:
+            print("⚠️ No reaction role data found, starting fresh")
+        return result
+    except Exception as e:
+        print(f"❌ Error loading reaction roles from MongoDB: {e}")
+        return {}
+
+
+def process_description(description: str) -> str:
+    if not description:
+        return ""
+    return description.replace('\\n', '\n')
+
+
+def parse_color(color: str, default=None):
+    if default is None:
+        default = discord.Color.blue()
+    if not color:
+        return default, True
+    try:
+        return discord.Color(int(color.strip('#'), 16)), True
+    except ValueError:
+        return default, False
+
+
 
 class ReactionRole(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.reaction_roles = self.load_reaction_roles()
+        self.reaction_roles = load_reaction_roles()
         self.unique_messages = set()
         self._load_unique_messages()
-        # Create a task to restore reactions when bot is ready
         self.bot.loop.create_task(self.initialize_reactions())
 
-    async def initialize_reactions(self):
-        """Initialize reactions after bot is ready"""
-        await self.bot.wait_until_ready()
-        await asyncio.sleep(2)  # Small delay to ensure everything is loaded
-        await self.restore_reactions()
+    # ---------- persistence helpers ----------
 
     def _load_unique_messages(self):
-        """Load unique messages from current reaction roles"""
         for data in self.reaction_roles.values():
             if data.get("type") == "unique":
-                message_content = f"{data.get('title', '')} {data.get('description', '')}".lower()
-                self.unique_messages.add(message_content)
-
-    def load_reaction_roles(self):
-        """Load reaction roles from JSON file with multiple fallback options"""
-        # Try primary file first
-        if os.path.exists(REACTION_ROLES_FILE):
-            try:
-                with open(REACTION_ROLES_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    # Convert string keys to integers
-                    result = {}
-                    for k, v in data.items():
-                        try:
-                            result[int(k)] = v
-                        except ValueError:
-                            result[k] = v
-                    return result
-            except (json.JSONDecodeError, ValueError) as e:
-                print(f"❌ Error loading {REACTION_ROLES_FILE}: {e}")
-                return {}
-        
-        print("⚠️ No reaction role data found, starting fresh")
-        return {}
-
-    def _atomic_save(self, data):
-        """Atomic save operation to prevent data corruption"""
-        tmp_path = None
-        try:
-            # Write to temporary file first
-            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.json', delete=False) as tmp:
-                # Convert all keys to strings for JSON serialization
-                json_data = {str(k): v for k, v in data.items()}
-                json.dump(json_data, tmp, indent=4, ensure_ascii=False)
-                tmp_path = tmp.name
-            
-            # Replace original file
-            os.replace(tmp_path, REACTION_ROLES_FILE)
-            return True
-        except Exception as e:
-            print(f"❌ Atomic save failed: {e}")
-            # Clean up temp file if it exists
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            return False
+                content = f"{data.get('title', '')} {data.get('description', '')}".lower()
+                self.unique_messages.add(content)
 
     def save_reaction_roles(self):
-        """Save current reaction roles with robust error handling"""
         try:
-            # Create backup before saving
-            if os.path.exists(REACTION_ROLES_FILE):
-                backup_file = REACTION_ROLES_FILE + '.bak'
-                try:
-                    os.replace(REACTION_ROLES_FILE, backup_file)
-                    print(f"✅ Created backup: {backup_file}")
-                except Exception as e:
-                    print(f"⚠️ Could not create backup: {e}")
-            
-            # Save current data
-            success = self._atomic_save(self.reaction_roles)
-            if success:
-                print(f"✅ Saved {len(self.reaction_roles)} reaction role setups")
-            else:
-                print("❌ Failed to save reaction roles")
+            json_data = {str(k): v for k, v in self.reaction_roles.items()}
+            success = save_blob(COLLECTION, json_data)
+            print(f"{'✅' if success else '❌'} Save {'succeeded' if success else 'failed'} "
+                  f"({len(self.reaction_roles)} setups)")
             return success
-            
         except Exception as e:
             print(f"❌ Critical error saving reaction roles: {e}")
             return False
 
-    def process_description(self, description: str) -> str:
-        """Convert \n to actual line breaks in description"""
-        if not description:
-            return ""
-        return description.replace('\\n', '\n')
+    # ---------- startup reaction restore (unchanged) ----------
+
+    async def initialize_reactions(self):
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(2)
+        await self.restore_reactions()
 
     async def restore_reactions(self):
-        """Restore missing reactions to messages after bot restart WITHOUT clearing existing ones"""
         if not self.reaction_roles:
             print("ℹ️ No reaction roles to restore")
             return
-            
+
         restored_count = 0
         failed_messages = []
         skipped_count = 0
-        
+
         for message_id, data in self.reaction_roles.items():
             try:
                 channel_id = data.get("channel_id")
                 reactions = data.get("reactions", {})
-                
                 if not channel_id or not reactions:
-                    print(f"⚠️ Skipping message {message_id}: missing channel_id or reactions")
                     continue
-                    
                 channel = self.bot.get_channel(channel_id)
                 if not channel:
-                    print(f"❌ Channel {channel_id} not found for message {message_id}")
                     failed_messages.append(message_id)
                     continue
-                
-                # Fetch the message
                 try:
                     message = await channel.fetch_message(message_id)
-                except discord.NotFound:
-                    print(f"❌ Message {message_id} not found in channel {channel.name}")
+                except (discord.NotFound, discord.Forbidden):
                     failed_messages.append(message_id)
                     continue
-                except discord.Forbidden:
-                    print(f"❌ No permission to access message {message_id} in channel {channel.name}")
-                    failed_messages.append(message_id)
-                    continue
-                
-                # Get current reactions on the message (by bot)
+
                 current_reactions = []
                 for reaction in message.reactions:
-                    # Check if this reaction was added by the bot
                     try:
-                        # Fetch users who added this reaction (limit to bot)
                         async for user in reaction.users(limit=10):
                             if user.id == self.bot.user.id:
                                 current_reactions.append(str(reaction.emoji))
                                 break
                     except discord.HTTPException:
                         continue
-                
-                # Add only missing reactions
+
                 for emoji in reactions.keys():
                     if emoji in current_reactions:
                         skipped_count += 1
-                        continue  # Reaction already exists, skip
-                    
+                        continue
                     try:
                         await message.add_reaction(emoji)
                         restored_count += 1
-                        # Respect rate limits
                         await asyncio.sleep(0.25)
-                    except (discord.HTTPException, discord.InvalidArgument) as e:
-                        print(f"❌ Failed to add reaction {emoji} to message {message_id}: {e}")
-                        
+                    except discord.HTTPException as e:
+                        print(f"❌ Failed to add reaction {emoji} to {message_id}: {e}")
             except Exception as e:
-                print(f"❌ Unexpected error restoring message {message_id}: {e}")
+                print(f"❌ Unexpected error restoring {message_id}: {e}")
                 failed_messages.append(message_id)
-        
-        # Summary
-        success_count = len(self.reaction_roles) - len(failed_messages)
-        print(f"✅ Restored {restored_count} reactions (skipped {skipped_count} already existing) across {success_count}/{len(self.reaction_roles)} messages")
-        
-        if failed_messages:
-            print(f"❌ Failed to restore {len(failed_messages)} messages: {failed_messages}")
-            
-        # Optional: Clean up failed messages from storage
-        if failed_messages:
-            self._cleanup_failed_messages(failed_messages)
 
-    def _cleanup_failed_messages(self, failed_message_ids):
-        """Remove messages that no longer exist from storage"""
-        cleaned_count = 0
-        for msg_id in failed_message_ids:
-            if msg_id in self.reaction_roles:
-                del self.reaction_roles[msg_id]
-                cleaned_count += 1
-        
-        if cleaned_count > 0:
+        success_count = len(self.reaction_roles) - len(failed_messages)
+        print(f"✅ Restored {restored_count} reactions (skipped {skipped_count}) "
+              f"across {success_count}/{len(self.reaction_roles)} messages")
+
+        if failed_messages:
+            for msg_id in failed_messages:
+                self.reaction_roles.pop(msg_id, None)
             self.save_reaction_roles()
-            print(f"🧹 Cleaned {cleaned_count} non-existent messages from storage")
 
     async def _handle_missing_role(self, message_id, emoji, role_id):
-        """Handle cases where a role no longer exists"""
-        print(f"🗑️ Removing invalid role mapping: {emoji} -> {role_id}")
         if message_id in self.reaction_roles and emoji in self.reaction_roles[message_id].get("reactions", {}):
             del self.reaction_roles[message_id]["reactions"][emoji]
             self.save_reaction_roles()
 
-    # MESSAGE CREATION COMMAND
-    @app_commands.command(name="rr_create", description="Create a new reaction role message")
-    @app_commands.describe(
-        title="The title for your embed message",
-        description="The description for your embed message (use \\n for line breaks)",
-        message_type="The type of message",
-        color="Hex color for the embed (e.g., #FF0000)"
-    )
-    @app_commands.choices(message_type=[
-        app_commands.Choice(name="Normal", value="normal"),
-        app_commands.Choice(name="Unique", value="unique"),
-        app_commands.Choice(name="Verify", value="verify")
-    ])
-    async def rr_create(self, interaction: discord.Interaction, title: str, description: str, message_type: app_commands.Choice[str], color: str = None):
-        """Create a new reaction role message with better feedback"""
-        await interaction.response.defer(ephemeral=True)
-        
-        # Check permissions
-        if not interaction.user.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ You need `Manage Roles` permission to use this command.", ephemeral=True)
+    # ---------- reaction listeners (unchanged behavior) ----------
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload):
+        if payload.user_id == self.bot.user.id:
+            return
+        if payload.message_id not in self.reaction_roles:
             return
 
-        if message_type.value == "unique":
-            message_content = f"{title} {description}".lower()
-            if message_content in self.unique_messages:
-                await interaction.followup.send("❌ A unique message with this content already exists.", ephemeral=True)
-                return
-            self.unique_messages.add(message_content)
-        
-        # Parse color
-        embed_color = discord.Color.blue()
-        if color:
+        emoji = str(payload.emoji)
+        data = self.reaction_roles[payload.message_id]
+        reactions = data.get("reactions", {})
+        msg_type = data.get("type", "normal")
+        if emoji not in reactions:
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+        role_id = reactions[emoji]
+        role = guild.get_role(role_id)
+        if not role:
+            await self._handle_missing_role(payload.message_id, emoji, role_id)
+            return
+
+        member = guild.get_member(payload.user_id)
+        if member and not member.bot:
             try:
-                embed_color = discord.Color(int(color.strip('#'), 16))
-            except ValueError:
-                await interaction.followup.send("⚠️ Invalid color format, using default blue.", ephemeral=True)
-        
-        # Process description to convert \n to actual line breaks
-        processed_description = self.process_description(description)
-        
-        # Create embed based on type
-        if message_type.value == "verify":
-            embed = discord.Embed(
-                title="🔐 " + title,
-                description=processed_description,
-                color=discord.Color.gold()
-            )
-            embed.set_footer(text="React to verify yourself")
-        else:
-            embed = discord.Embed(
-                title=title,
-                description=processed_description,
-                color=embed_color
-            )
-            embed.set_footer(text="React to get roles • Remove reaction to remove roles")
-        
-        try:
-            message = await interaction.channel.send(embed=embed)
-            
-            self.reaction_roles[message.id] = {
-                "reactions": {},
-                "type": message_type.value,
-                "channel_id": interaction.channel.id,
-                "title": title,
-                "description": description,  # Store original description with \n
-                "color": color
-            }
-            
-            self.save_reaction_roles()
-            
-            success_embed = discord.Embed(
-                title="✅ Reaction Role Created",
-                description=f"**Message ID:** `{message.id}`\n**Type:** {message_type.value.title()}",
-                color=discord.Color.green()
-            )
-            success_embed.add_field(
-                name="Next Steps", 
-                value=f"Use `/rr_add {message.id} <emoji> <role>` to add roles",
-                inline=False
-            )
-            
-            await interaction.followup.send(embed=success_embed, ephemeral=True)
-            
-        except discord.Forbidden:
-            await interaction.followup.send("❌ I don't have permission to send messages in that channel.", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ An error occurred: {e}", ephemeral=True)
-
-    @app_commands.command(name="rr_edit", description="Edit an existing reaction role message")
-    @app_commands.describe(
-        message_id="The ID of the message to edit",
-        title="New title for the embed",
-        description="New description for the embed (use \\n for line breaks)",
-        color="New hex color for the embed (e.g., #FF0000)",
-        channel="The channel where the message is located"
-    )
-    async def rr_edit(self, interaction: discord.Interaction, message_id: str, title: str = None, description: str = None, color: str = None, channel: discord.TextChannel = None):
-        """Edit an existing reaction role message"""
-        await interaction.response.defer(ephemeral=True)
-        
-        # Check permissions
-        if not interaction.user.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ You need `Manage Roles` permission to use this command.", ephemeral=True)
-            return
-
-        try:
-            message_id_int = int(message_id)
-            target_channel = channel or interaction.channel
-            
-            if message_id_int not in self.reaction_roles:
-                await interaction.followup.send("❌ No reaction role setup found for this message.", ephemeral=True)
-                return
-            
-            # Fetch the message
-            try:
-                message = await target_channel.fetch_message(message_id_int)
-            except discord.NotFound:
-                await interaction.followup.send("❌ Message not found in the specified channel.", ephemeral=True)
-                return
-            except discord.Forbidden:
-                await interaction.followup.send("❌ I don't have permission to access that channel.", ephemeral=True)
-                return
-            
-            # Get current embed
-            if not message.embeds:
-                await interaction.followup.send("❌ This message doesn't have an embed to edit.", ephemeral=True)
-                return
-            
-            old_embed = message.embeds[0]
-            data = self.reaction_roles[message_id_int]
-            
-            # Create new embed with updated fields
-            new_embed = discord.Embed()
-            
-            # Update title
-            new_embed.title = title if title else old_embed.title
-            if not new_embed.title and title:
-                new_embed.title = title
-            
-            # Update description - process \n to actual line breaks
-            if description is not None:
-                processed_description = self.process_description(description)
-                new_embed.description = processed_description
-            else:
-                new_embed.description = old_embed.description
-            
-            # Update color
-            if color:
-                try:
-                    new_embed.color = discord.Color(int(color.strip('#'), 16))
-                except ValueError:
-                    await interaction.followup.send("⚠️ Invalid color format, keeping current color.", ephemeral=True)
-                    new_embed.color = old_embed.color
-            else:
-                new_embed.color = old_embed.color
-            
-            # Copy footer and other properties
-            if old_embed.footer:
-                new_embed.set_footer(text=old_embed.footer.text)
-            
-            # Update the message
-            await message.edit(embed=new_embed)
-            
-            # Update stored data
-            if title:
-                data["title"] = title
-            if description is not None:  # Explicitly check for None to allow empty strings
-                data["description"] = description  # Store original with \n
-            if color:
-                data["color"] = color
-            
-            self.save_reaction_roles()
-            
-            success_embed = discord.Embed(
-                title="✅ Reaction Role Updated",
-                description=f"**Message ID:** `{message_id}`",
-                color=discord.Color.green()
-            )
-            if title:
-                success_embed.add_field(name="New Title", value=title, inline=False)
-            if description is not None:
-                # Show processed description in the success message
-                success_embed.add_field(name="New Description", value=self.process_description(description) or "*Empty*", inline=False)
-            if color:
-                success_embed.add_field(name="New Color", value=color, inline=False)
-            
-            await interaction.followup.send(embed=success_embed, ephemeral=True)
-            
-        except ValueError:
-            await interaction.followup.send("❌ Invalid message ID format.", ephemeral=True)
-
-    @app_commands.command(name="rr_delete", description="Delete a reaction role message completely")
-    @app_commands.describe(
-        message_id="The ID of the message to delete",
-        channel="The channel where the message is located"
-    )
-    async def rr_delete(self, interaction: discord.Interaction, message_id: str, channel: discord.TextChannel = None):
-        """Completely remove a reaction role setup and delete the message"""
-        await interaction.response.defer(ephemeral=True)
-        
-        # Check permissions
-        if not interaction.user.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ You need `Manage Roles` permission to use this command.", ephemeral=True)
-            return
-
-        try:
-            message_id_int = int(message_id)
-            target_channel = channel or interaction.channel
-            
-            if message_id_int not in self.reaction_roles:
-                await interaction.followup.send("❌ No reaction role setup found for this message.", ephemeral=True)
-                return
-            
-            data = self.reaction_roles[message_id_int]
-            
-            # Remove from unique messages if applicable
-            if data.get("type") == "unique":
-                message_content = f"{data.get('title', '')} {data.get('description', '')}".lower()
-                if message_content in self.unique_messages:
-                    self.unique_messages.remove(message_content)
-            
-            # ALWAYS try to delete the Discord message
-            message_deleted = False
-            try:
-                message = await target_channel.fetch_message(message_id_int)
-                await message.delete()
-                message_deleted = True
-                print(f"✅ Deleted reaction role message {message_id_int} from channel {target_channel.name}")
-            except discord.NotFound:
-                await interaction.followup.send("⚠️ Message not found, but removing from configuration.", ephemeral=True)
-            except discord.Forbidden:
-                await interaction.followup.send("❌ I don't have permission to delete messages in that channel.", ephemeral=True)
-                return
-            except Exception as e:
-                await interaction.followup.send(f"❌ Failed to delete message: {e}", ephemeral=True)
-                return
-            
-            # Remove from configuration
-            del self.reaction_roles[message_id_int]
-            self.save_reaction_roles()
-            
-            success_embed = discord.Embed(
-                title="✅ Reaction Role Deleted",
-                description=f"**Message ID:** `{message_id}`\n**Message Deleted:** {'Yes' if message_deleted else 'No'}",
-                color=discord.Color.green()
-            )
-            success_embed.add_field(
-                name="Removed Configuration",
-                value=f"**Reactions:** {len(data.get('reactions', {}))}\n**Type:** {data.get('type', 'normal')}",
-                inline=False
-            )
-            
-            await interaction.followup.send(embed=success_embed, ephemeral=True)
-            
-        except ValueError:
-            await interaction.followup.send("❌ Invalid message ID format.", ephemeral=True)
-
-    # ROLE MANAGEMENT COMMANDS
-    @app_commands.command(name="rr_add", description="Add an emoji role to a message")
-    @app_commands.describe(
-        message_id="The ID of the message to add reaction to",
-        emoji="The emoji to use for the reaction",
-        role="The role to assign when this emoji is clicked",
-        channel="The channel where the message is located"
-    )
-    async def rr_add(self, interaction: discord.Interaction, message_id: str, emoji: str, 
-                    role: discord.Role, channel: discord.TextChannel = None):
-        """Add a reaction role to an existing message with better validation"""
-        await interaction.response.defer(ephemeral=True)
-        
-        # Check permissions
-        if not interaction.user.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ You need `Manage Roles` permission to use this command.", ephemeral=True)
-            return
-        
-        # Validate bot can manage the role
-        if role.position >= interaction.guild.me.top_role.position:
-            await interaction.followup.send("❌ I cannot manage this role. It's higher than my highest role.", ephemeral=True)
-            return
-
-        try:
-            message_id_int = int(message_id)
-            target_channel = channel or interaction.channel
-            
-            try:
-                message = await target_channel.fetch_message(message_id_int)
-                
-                # Check if emoji is valid
-                try:
-                    await message.add_reaction(emoji)
-                except (discord.HTTPException, discord.InvalidArgument):
-                    await interaction.followup.send("❌ Invalid emoji or cannot use this emoji.", ephemeral=True)
+                if role.position >= guild.me.top_role.position:
                     return
-                
-                # Initialize message data if not exists
-                if message_id_int not in self.reaction_roles:
-                    self.reaction_roles[message_id_int] = {
-                        "reactions": {},
-                        "type": "normal",
-                        "channel_id": target_channel.id
-                    }
-                
-                # Check if emoji already used
-                if emoji in self.reaction_roles[message_id_int]["reactions"]:
-                    await interaction.followup.send(f"❌ Emoji {emoji} is already used in this message.", ephemeral=True)
-                    return
-                
-                # Add reaction role
-                self.reaction_roles[message_id_int]["reactions"][emoji] = role.id
-                self.save_reaction_roles()
-                
-                success_embed = discord.Embed(
-                    title="✅ Reaction Role Added",
-                    description=f"**Emoji:** {emoji}\n**Role:** {role.mention}",
-                    color=discord.Color.green()
-                )
-                success_embed.add_field(
-                    name="Message Info",
-                    value=f"**ID:** `{message_id}`\n**Channel:** {target_channel.mention}",
-                    inline=False
-                )
-                
-                await interaction.followup.send(embed=success_embed, ephemeral=True)
-                
-            except discord.NotFound:
-                await interaction.followup.send("❌ Message not found in the specified channel.", ephemeral=True)
+                await member.add_roles(role, reason="Reaction Role")
+                if msg_type == "verify":
+                    try:
+                        channel = self.bot.get_channel(payload.channel_id)
+                        if channel:
+                            message = await channel.fetch_message(payload.message_id)
+                            await message.remove_reaction(payload.emoji, member)
+                    except Exception as e:
+                        print(f"⚠️ Could not remove verification reaction: {e}")
             except discord.Forbidden:
-                await interaction.followup.send("❌ I don't have permission to access that channel or add reactions.", ephemeral=True)
-                
-        except ValueError:
-            await interaction.followup.send("❌ Invalid message ID format.", ephemeral=True)
+                print(f"❌ Missing permissions to add {role.name} in {guild.name}")
+            except discord.HTTPException as e:
+                print(f"❌ Error adding role: {e}")
 
-    @app_commands.command(name="rr_remove", description="Remove a reaction role from a message")
-    @app_commands.describe(
-        message_id="The ID of the message",
-        emoji="The emoji to remove",
-        channel="The channel where the message is located"
-    )
-    async def rr_remove(self, interaction: discord.Interaction, message_id: str, emoji: str, channel: discord.TextChannel = None):
-        """Remove a specific reaction role from a message"""
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            message_id_int = int(message_id)
-            target_channel = channel or interaction.channel
-            
-            if message_id_int not in self.reaction_roles:
-                await interaction.followup.send("❌ No reaction role setup found for this message.", ephemeral=True)
-                return
-            
-            data = self.reaction_roles[message_id_int]
-            if emoji not in data.get("reactions", {}):
-                await interaction.followup.send(f"❌ Emoji {emoji} not found in this reaction role setup.", ephemeral=True)
-                return
-            
-            # Remove from configuration
-            role_id = data["reactions"].pop(emoji)
-            self.save_reaction_roles()
-            
-            # Try to remove reaction from message
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload):
+        if payload.message_id not in self.reaction_roles:
+            return
+        emoji = str(payload.emoji)
+        data = self.reaction_roles[payload.message_id]
+        reactions = data.get("reactions", {})
+        if data.get("type") == "verify" or emoji not in reactions:
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+        role = guild.get_role(reactions[emoji])
+        if not role:
+            return
+        member = guild.get_member(payload.user_id)
+        if member and not member.bot:
             try:
-                message = await target_channel.fetch_message(message_id_int)
-                await message.clear_reaction(emoji)
-            except discord.HTTPException:
-                pass  # Ignore if we can't remove the reaction
-            
-            role = interaction.guild.get_role(role_id)
-            role_name = role.name if role else "Unknown Role"
-            
-            success_embed = discord.Embed(
-                title="✅ Reaction Role Removed",
-                description=f"**Emoji:** {emoji}\n**Role:** {role_name}",
-                color=discord.Color.green()
-            )
-            
-            await interaction.followup.send(embed=success_embed, ephemeral=True)
-            
-        except ValueError:
-            await interaction.followup.send("❌ Invalid message ID format.", ephemeral=True)
+                if role.position >= guild.me.top_role.position:
+                    return
+                await member.remove_roles(role, reason="Reaction Role")
+            except discord.Forbidden:
+                print(f"❌ Missing permissions to remove {role.name} in {guild.name}")
+            except discord.HTTPException as e:
+                print(f"❌ Error removing role: {e}")
 
-    # ROLE CREATION/DELETION COMMANDS
-    @app_commands.command(name="role_create", description="Create a new server role")
-    @app_commands.describe(
-        name="Name of the role",
-        color="Hex color for the role (e.g., #FF0000)",
-        hoist="Whether the role should be displayed separately",
-        mentionable="Whether the role can be mentioned by everyone"
-    )
-    async def role_create(self, interaction: discord.Interaction, name: str, color: str = None, hoist: bool = False, mentionable: bool = False):
-        """Create a new role in the server"""
-        await interaction.response.defer(ephemeral=True)
-        
-        # Check permissions
+    # ---------- the ONE slash command ----------
+
+    @app_commands.command(name="reactionroles", description="Open the reaction roles dashboard")
+    async def reactionroles(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ You need `Manage Roles` permission to use this command.", ephemeral=True)
-            return
-        
-        # Check bot permissions
-        if not interaction.guild.me.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ I don't have permission to manage roles.", ephemeral=True)
-            return
-        
-        try:
-            # Parse color
-            role_color = discord.Color.default()
-            if color:
-                try:
-                    role_color = discord.Color(int(color.strip('#'), 16))
-                except ValueError:
-                    await interaction.followup.send("⚠️ Invalid color format, using default color.", ephemeral=True)
-            
-            # Create the role
-            role = await interaction.guild.create_role(
-                name=name,
-                color=role_color,
-                hoist=hoist,
-                mentionable=mentionable,
-                reason=f"Role created by {interaction.user}"
+            await interaction.response.send_message(
+                "❌ You need `Manage Roles` permission to use this.", ephemeral=True
             )
-            
-            success_embed = discord.Embed(
-                title="✅ Role Created",
-                description=f"**Role:** {role.mention}",
-                color=discord.Color.green()
-            )
-            success_embed.add_field(name="Name", value=role.name, inline=True)
-            success_embed.add_field(name="Color", value=str(role.color), inline=True)
-            success_embed.add_field(name="Position", value=role.position, inline=True)
-            success_embed.add_field(name="Hoisted", value="Yes" if role.hoist else "No", inline=True)
-            success_embed.add_field(name="Mentionable", value="Yes" if role.mentionable else "No", inline=True)
-            success_embed.add_field(name="ID", value=f"`{role.id}`", inline=True)
-            
-            await interaction.followup.send(embed=success_embed, ephemeral=True)
-            
-        except discord.Forbidden:
-            await interaction.followup.send("❌ I don't have permission to create roles.", ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.followup.send(f"❌ Failed to create role: {e}", ephemeral=True)
+            return
+        view = DashboardView(self)
+        embed = dashboard_embed(self, interaction.guild)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @app_commands.command(name="role_delete", description="Delete a server role")
-    @app_commands.describe(
-        role="The role to delete"
+
+
+
+def dashboard_embed(cog: ReactionRole, guild: discord.Guild) -> discord.Embed:
+    server_messages = [
+        (mid, d) for mid, d in cog.reaction_roles.items()
+        if cog.bot.get_channel(d.get("channel_id")) and cog.bot.get_channel(d.get("channel_id")).guild.id == guild.id
+    ]
+    embed = discord.Embed(
+        title="🎛️ Reaction Roles Dashboard",
+        description=(
+            f"**{len(server_messages)}** reaction role message(s) in this server.\n\n"
+            "Use the buttons below to create, manage, or maintain your setups."
+        ),
+        color=discord.Color.blurple(),
     )
-    async def role_delete(self, interaction: discord.Interaction, role: discord.Role):
-        """Delete a role from the server"""
-        await interaction.response.defer(ephemeral=True)
-        
-        # Check permissions
-        if not interaction.user.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ You need `Manage Roles` permission to use this command.", ephemeral=True)
-            return
-        
-        # Check bot permissions
-        if not interaction.guild.me.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ I don't have permission to manage roles.", ephemeral=True)
-            return
-        
-        # Prevent deleting managed roles or @everyone
-        if role.managed or role.is_default():
-            await interaction.followup.send("❌ Cannot delete managed or default roles.", ephemeral=True)
-            return
-        
-        # Check role hierarchy
-        if role.position >= interaction.user.top_role.position and interaction.user != interaction.guild.owner:
-            await interaction.followup.send("❌ You can only delete roles below your highest role.", ephemeral=True)
-            return
-        
-        if role.position >= interaction.guild.me.top_role.position:
-            await interaction.followup.send("❌ I cannot delete roles higher than my highest role.", ephemeral=True)
-            return
-        
-        try:
-            role_name = role.name
-            role_id = role.id
-            
-            # Check if role is used in any reaction roles
-            used_in_messages = []
-            for msg_id, data in self.reaction_roles.items():
-                if str(role.id) in [str(r_id) for r_id in data.get("reactions", {}).values()]:
-                    used_in_messages.append(msg_id)
-            
-            # Delete the role
-            await role.delete(reason=f"Role deleted by {interaction.user}")
-            
-            success_embed = discord.Embed(
-                title="✅ Role Deleted",
-                description=f"**Role:** {role_name}",
-                color=discord.Color.green()
-            )
-            success_embed.add_field(name="ID", value=f"`{role_id}`", inline=True)
-            
-            if used_in_messages:
-                success_embed.add_field(
-                    name="⚠️ Cleanup Needed", 
-                    value=f"This role was used in {len(used_in_messages)} reaction role message(s). Use `/rr_info` to check and update them.",
-                    inline=False
-                )
-            
-            await interaction.followup.send(embed=success_embed, ephemeral=True)
-            
-        except discord.Forbidden:
-            await interaction.followup.send("❌ I don't have permission to delete this role.", ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.followup.send(f"❌ Failed to delete role: {e}", ephemeral=True)
+    return embed
 
-    # UTILITY COMMANDS
-    @app_commands.command(name="rr_list", description="List all reaction role messages in this server")
-    async def rr_list(self, interaction: discord.Interaction):
-        """List all reaction role setups in the server"""
-        await interaction.response.defer(ephemeral=True)
-        
-        server_messages = []
-        for msg_id, data in self.reaction_roles.items():
-            channel = self.bot.get_channel(data.get("channel_id"))
-            if channel and channel.guild.id == interaction.guild.id:
-                server_messages.append((msg_id, data, channel))
-        
+
+def message_panel_embed(data: dict, message_id: int, channel: discord.abc.GuildChannel, guild: discord.Guild) -> discord.Embed:
+    reactions = data.get("reactions", {})
+    embed = discord.Embed(
+        title=f"🔍 {data.get('title', 'Untitled')}",
+        description=f"**Type:** {data.get('type', 'normal').title()}\n**Channel:** {channel.mention if channel else 'Unknown'}",
+        color=discord.Color.blue(),
+    )
+    embed.set_footer(text=f"Message ID: {message_id}")
+    if reactions:
+        lines = []
+        for emoji, role_id in reactions.items():
+            role = guild.get_role(role_id)
+            lines.append(f"{emoji} → {role.mention if role else f'Deleted Role ({role_id})'}")
+        embed.add_field(name=f"Role Mappings ({len(lines)})", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="Role Mappings", value="No roles configured yet.", inline=False)
+    return embed
+
+
+
+class DashboardView(discord.ui.View):
+    def __init__(self, cog: ReactionRole):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def _check_perms(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ You need `Manage Roles` permission.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Create New", emoji="➕", style=discord.ButtonStyle.success, row=0)
+    async def create_new(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_perms(interaction):
+            return
+        await interaction.response.send_modal(CreateMessageModal(self.cog))
+
+    @discord.ui.button(label="Manage Existing", emoji="📋", style=discord.ButtonStyle.primary, row=0)
+    async def manage_existing(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_perms(interaction):
+            return
+        server_messages = [
+            (mid, d) for mid, d in self.cog.reaction_roles.items()
+            if self.cog.bot.get_channel(d.get("channel_id"))
+            and self.cog.bot.get_channel(d.get("channel_id")).guild.id == interaction.guild.id
+        ]
         if not server_messages:
-            await interaction.followup.send("❌ No reaction role messages found in this server.", ephemeral=True)
+            await interaction.response.send_message("❌ No reaction role messages found in this server.", ephemeral=True)
             return
-        
-        embed = discord.Embed(
-            title="📋 Reaction Role Messages",
-            description=f"Found {len(server_messages)} setup(s) in this server",
-            color=discord.Color.blue()
-        )
-        
-        for msg_id, data, channel in server_messages[:10]:  # Limit to first 10
-            reaction_count = len(data.get("reactions", {}))
-            embed.add_field(
-                name=f"`{msg_id}` - {data.get('type', 'normal').title()}",
-                value=f"**Channel:** {channel.mention}\n**Reactions:** {reaction_count}",
-                inline=False
-            )
-        
-        if len(server_messages) > 10:
-            embed.set_footer(text=f"Showing 10 out of {len(server_messages)} messages")
-        
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        view = SelectMessageView(self.cog, server_messages)
+        await interaction.response.send_message("Pick a message to manage:", view=view, ephemeral=True)
 
-    @app_commands.command(name="rr_info", description="Get detailed info about a reaction role message")
-    @app_commands.describe(
-        message_id="The ID of the message to check",
-        channel="The channel where the message is located"
-    )
-    async def rr_info(self, interaction: discord.Interaction, message_id: str, channel: discord.TextChannel = None):
-        """Get detailed information about a specific reaction role setup"""
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            message_id_int = int(message_id)
-            target_channel = channel or interaction.channel
-            
-            if message_id_int not in self.reaction_roles:
-                await interaction.followup.send("❌ No reaction role setup found for this message.", ephemeral=True)
-                return
-            
-            data = self.reaction_roles[message_id_int]
-            reactions = data.get("reactions", {})
-            
-            embed = discord.Embed(
-                title="🔍 Reaction Role Info",
-                color=discord.Color.blue()
-            )
-            
-            embed.add_field(name="Message ID", value=f"`{message_id}`", inline=True)
-            embed.add_field(name="Type", value=data.get("type", "normal").title(), inline=True)
-            embed.add_field(name="Channel", value=target_channel.mention, inline=True)
-            
-            if reactions:
-                roles_info = []
-                for emoji, role_id in reactions.items():
-                    role = interaction.guild.get_role(role_id)
-                    role_name = role.mention if role else f"Deleted Role ({role_id})"
-                    roles_info.append(f"{emoji} → {role_name}")
-                
-                embed.add_field(
-                    name=f"Role Mappings ({len(roles_info)})",
-                    value="\n".join(roles_info) if roles_info else "No roles configured",
-                    inline=False
-                )
-            else:
-                embed.add_field(name="Role Mappings", value="No roles configured yet", inline=False)
-            
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except ValueError:
-            await interaction.followup.send("❌ Invalid message ID format.", ephemeral=True)
-
-    @app_commands.command(name="rr_cleanup", description="Clean up invalid reaction role configurations")
-    async def rr_cleanup(self, interaction: discord.Interaction):
-        """Clean up reaction roles that reference missing messages or roles"""
-        await interaction.response.defer(ephemeral=True)
-        
-        if not interaction.user.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ You need `Manage Roles` permission to use this command.", ephemeral=True)
+    @discord.ui.button(label="Cleanup", emoji="🧹", style=discord.ButtonStyle.secondary, row=1)
+    async def cleanup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_perms(interaction):
             return
-        
-        cleaned_count = 0
-        role_cleaned_count = 0
-        
-        for msg_id in list(self.reaction_roles.keys()):
-            data = self.reaction_roles[msg_id]
-            channel_id = data.get("channel_id")
-            channel = self.bot.get_channel(channel_id)
-            
-            # Check if message still exists
+        await interaction.response.defer(ephemeral=True)
+        cleaned, role_cleaned = 0, 0
+        for msg_id in list(self.cog.reaction_roles.keys()):
+            data = self.cog.reaction_roles[msg_id]
+            channel = self.cog.bot.get_channel(data.get("channel_id"))
             try:
                 if channel:
                     await channel.fetch_message(msg_id)
                 else:
-                    # Channel not found, remove configuration
-                    del self.reaction_roles[msg_id]
-                    cleaned_count += 1
+                    del self.cog.reaction_roles[msg_id]
+                    cleaned += 1
                     continue
             except (discord.NotFound, discord.Forbidden):
-                # Message not found or no access, remove configuration
-                del self.reaction_roles[msg_id]
-                cleaned_count += 1
+                del self.cog.reaction_roles[msg_id]
+                cleaned += 1
                 continue
-            
-            # Check if roles still exist
-            reactions = data.get("reactions", {})
-            for emoji, role_id in list(reactions.items()):
-                role = interaction.guild.get_role(role_id)
-                if not role:
-                    del reactions[emoji]
-                    role_cleaned_count += 1
-        
-        if cleaned_count > 0 or role_cleaned_count > 0:
-            self.save_reaction_roles()
-            embed = discord.Embed(
-                title="🧹 Cleanup Complete",
-                color=discord.Color.orange()
+            for emoji, role_id in list(data.get("reactions", {}).items()):
+                if not interaction.guild.get_role(role_id):
+                    del data["reactions"][emoji]
+                    role_cleaned += 1
+        if cleaned or role_cleaned:
+            self.cog.save_reaction_roles()
+            await interaction.followup.send(
+                f"🧹 Cleanup complete. Removed {cleaned} stale message(s), fixed {role_cleaned} role mapping(s).",
+                ephemeral=True,
             )
-            if cleaned_count > 0:
-                embed.add_field(name="Messages Removed", value=cleaned_count, inline=True)
-            if role_cleaned_count > 0:
-                embed.add_field(name="Role Mappings Fixed", value=role_cleaned_count, inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            await interaction.followup.send("✅ No cleanup needed - all configurations are valid!", ephemeral=True)
+            await interaction.followup.send("✅ No cleanup needed — everything is valid!", ephemeral=True)
 
-    @app_commands.command(name="rr_backup", description="Create a backup of reaction role data")
-    async def rr_backup(self, interaction: discord.Interaction):
-        """Create a manual backup of reaction role data"""
-        await interaction.response.defer(ephemeral=True)
-        
-        if not interaction.user.guild_permissions.manage_roles:
-            await interaction.followup.send("❌ You need `Manage Roles` permission to use this command.", ephemeral=True)
+    @discord.ui.button(label="Backup", emoji="💾", style=discord.ButtonStyle.secondary, row=1)
+    async def backup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_perms(interaction):
             return
-        
         try:
-            backup_file = REACTION_ROLES_FILE + '.backup'
-            with open(backup_file, 'w', encoding='utf-8') as f:
-                json.dump(self.reaction_roles, f, indent=4, ensure_ascii=False)
-            
-            embed = discord.Embed(
-                title="✅ Backup Created",
-                description=f"Backup saved to `{backup_file}`",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Total Setups", value=len(self.reaction_roles), inline=True)
-            embed.add_field(name="Total Reactions", value=sum(len(data.get("reactions", {})) for data in self.reaction_roles.values()), inline=True)
-            
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            json_data = {str(k): v for k, v in self.cog.reaction_roles.items()}
+            success = save_blob(f"{COLLECTION}_backup", json_data)
+            if success:
+                await interaction.response.send_message(
+                    f"✅ Backup saved. **{len(self.cog.reaction_roles)}** setup(s) backed up.", ephemeral=True
+                )
+            else:
+                await interaction.response.send_message("❌ Backup failed.", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"❌ Failed to create backup: {e}", ephemeral=True)
+            await interaction.response.send_message(f"❌ Backup failed: {e}", ephemeral=True)
 
-    @commands.Cog.listener()
-    async def on_raw_reaction_add(self, payload):
-        """Handle reaction add for role assignment with comprehensive error handling"""
-        if payload.user_id == self.bot.user.id:
+
+
+class SelectMessageView(discord.ui.View):
+    def __init__(self, cog: ReactionRole, server_messages):
+        super().__init__(timeout=180)
+        self.cog = cog
+        options = [
+            discord.SelectOption(
+                label=(data.get("title") or "Untitled")[:100],
+                description=f"{data.get('type', 'normal').title()} • {len(data.get('reactions', {}))} role(s)",
+                value=str(mid),
+            )
+            for mid, data in server_messages[:25]
+        ]
+        self.select = discord.ui.Select(placeholder="Choose a reaction role message...", options=options)
+        self.select.callback = self.on_select
+        self.add_item(self.select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        message_id = int(self.select.values[0])
+        data = self.cog.reaction_roles.get(message_id)
+        if not data:
+            await interaction.response.send_message("❌ That message no longer exists.", ephemeral=True)
             return
-            
-        if payload.message_id in self.reaction_roles:
-            emoji = str(payload.emoji)
-            data = self.reaction_roles[payload.message_id]
-            reactions = data.get("reactions", {})
-            msg_type = data.get("type", "normal")
-            
-            if emoji in reactions:
-                guild = self.bot.get_guild(payload.guild_id)
-                if not guild:
-                    print(f"❌ Guild {payload.guild_id} not found")
-                    return
-                    
-                role_id = reactions[emoji]
-                role = guild.get_role(role_id)
-                
-                if not role:
-                    print(f"❌ Role {role_id} not found in guild {guild.name}")
-                    # Optionally remove the invalid reaction role
-                    await self._handle_missing_role(payload.message_id, emoji, role_id)
-                    return
-                
-                member = guild.get_member(payload.user_id)
-                if member and not member.bot:
-                    try:
-                        # Check if bot can manage this role
-                        if role.position >= guild.me.top_role.position:
-                            print(f"❌ Cannot assign role {role.name} - it's higher than my highest role")
-                            return
-                            
-                        await member.add_roles(role, reason="Reaction Role")
-                        print(f"✅ Added {role.name} to {member.display_name} in {guild.name}")
-                        
-                        # Handle verification type - remove reaction after adding role
-                        if msg_type == "verify":
-                            try:
-                                channel = self.bot.get_channel(payload.channel_id)
-                                if channel:
-                                    message = await channel.fetch_message(payload.message_id)
-                                    await message.remove_reaction(payload.emoji, member)
-                                    print(f"🔐 Removed verification reaction for {member.display_name}")
-                            except Exception as e:
-                                print(f"⚠️ Could not remove verification reaction: {e}")
-                                
-                    except discord.Forbidden:
-                        print(f"❌ Missing permissions to add {role.name} in {guild.name}")
-                    except discord.HTTPException as e:
-                        print(f"❌ Error adding role to {member.display_name}: {e}")
+        channel = self.cog.bot.get_channel(data.get("channel_id"))
+        embed = message_panel_embed(data, message_id, channel, interaction.guild)
+        view = MessagePanelView(self.cog, message_id)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
-    @commands.Cog.listener()
-    async def on_raw_reaction_remove(self, payload):
-        """Handle reaction remove for role removal with better error handling"""
-        if payload.message_id in self.reaction_roles:
-            emoji = str(payload.emoji)
-            data = self.reaction_roles[payload.message_id]
-            reactions = data.get("reactions", {})
-            msg_type = data.get("type", "normal")
-            
-            # Don't remove roles for verification type or if reaction remove is disabled
-            if msg_type == "verify":
+
+
+class MessagePanelView(discord.ui.View):
+    def __init__(self, cog: ReactionRole, message_id: int):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.message_id = message_id
+
+    def _refresh_embed(self, guild: discord.Guild):
+        data = self.cog.reaction_roles.get(self.message_id)
+        channel = self.cog.bot.get_channel(data.get("channel_id"))
+        return message_panel_embed(data, self.message_id, channel, guild)
+
+    @discord.ui.button(label="Edit", emoji="✏️", style=discord.ButtonStyle.primary, row=0)
+    async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = self.cog.reaction_roles.get(self.message_id)
+        if not data:
+            await interaction.response.send_message("❌ Message no longer tracked.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EditMessageModal(self.cog, self.message_id, data))
+
+    @discord.ui.button(label="Add Role", emoji="🎭", style=discord.ButtonStyle.success, row=0)
+    async def add_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddRoleEmojiModal(self.cog, self.message_id))
+
+    @discord.ui.button(label="Remove Role", emoji="➖", style=discord.ButtonStyle.danger, row=0)
+    async def remove_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = self.cog.reaction_roles.get(self.message_id, {})
+        reactions = data.get("reactions", {})
+        if not reactions:
+            await interaction.response.send_message("❌ No role mappings to remove.", ephemeral=True)
+            return
+        view = RemoveRoleView(self.cog, self.message_id, reactions)
+        await interaction.response.send_message("Pick a mapping to remove:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Delete Message", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ConfirmDeleteView(self.cog, self.message_id)
+        await interaction.response.send_message(
+            "⚠️ This will permanently delete the message and its configuration. Are you sure?",
+            view=view, ephemeral=True,
+        )
+
+
+class RemoveRoleView(discord.ui.View):
+    def __init__(self, cog: ReactionRole, message_id: int, reactions: dict):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.message_id = message_id
+        options = [
+            discord.SelectOption(label=f"{emoji}", description=f"Role ID: {role_id}", value=emoji)
+            for emoji, role_id in list(reactions.items())[:25]
+        ]
+        self.select = discord.ui.Select(placeholder="Choose an emoji → role mapping to remove", options=options)
+        self.select.callback = self.on_select
+        self.add_item(self.select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        await interaction.response.defer()  # clear_reaction below can be slow
+
+        emoji = self.select.values[0]
+        data = self.cog.reaction_roles.get(self.message_id)
+        if not data or emoji not in data.get("reactions", {}):
+            await interaction.edit_original_response(content="❌ That mapping no longer exists.", view=None)
+            return
+        data["reactions"].pop(emoji, None)
+        self.cog.save_reaction_roles()
+
+        channel = self.cog.bot.get_channel(data.get("channel_id"))
+        if channel:
+            try:
+                message = await channel.fetch_message(self.message_id)
+                await message.clear_reaction(emoji)
+            except discord.HTTPException:
+                pass
+
+        await interaction.edit_original_response(content=f"✅ Removed mapping for {emoji}.", view=None)
+
+
+class ConfirmDeleteView(discord.ui.View):
+    def __init__(self, cog: ReactionRole, message_id: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.message_id = message_id
+
+    @discord.ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()  # fetch_message/delete below can be slow
+
+        data = self.cog.reaction_roles.get(self.message_id)
+        if not data:
+            await interaction.edit_original_response(content="❌ Already deleted.", view=None)
+            return
+
+        if data.get("type") == "unique":
+            content = f"{data.get('title', '')} {data.get('description', '')}".lower()
+            self.cog.unique_messages.discard(content)
+
+        channel = self.cog.bot.get_channel(data.get("channel_id"))
+        deleted = False
+        if channel:
+            try:
+                message = await channel.fetch_message(self.message_id)
+                await message.delete()
+                deleted = True
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                await interaction.edit_original_response(
+                    content="❌ I don't have permission to delete that message.", view=None
+                )
                 return
-                
-            if emoji in reactions:
-                guild = self.bot.get_guild(payload.guild_id)
-                if not guild:
-                    return
-                    
-                role_id = reactions[emoji]
-                role = guild.get_role(role_id)
-                
-                if not role:
-                    return
-                
-                member = guild.get_member(payload.user_id)
-                if member and not member.bot:
-                    try:
-                        # Check if bot can manage this role
-                        if role.position >= guild.me.top_role.position:
-                            print(f"❌ Cannot remove role {role.name} - it's higher than my highest role")
-                            return
-                            
-                        await member.remove_roles(role, reason="Reaction Role")
-                        print(f"✅ Removed {role.name} from {member.display_name} in {guild.name}")
-                    except discord.Forbidden:
-                        print(f"❌ Missing permissions to remove {role.name} in {guild.name}")
-                    except discord.HTTPException as e:
-                        print(f"❌ Error removing role from {member.display_name}: {e}")
+
+        del self.cog.reaction_roles[self.message_id]
+        self.cog.save_reaction_roles()
+        await interaction.edit_original_response(
+            content=f"✅ Configuration removed.{' Message deleted.' if deleted else ' (Message was already gone.)'}",
+            view=None,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Cancelled.", view=None)
+
+
+# MODALS
+class CreateMessageModal(discord.ui.Modal, title="Create Reaction Role Message"):
+    msg_title = discord.ui.TextInput(label="Title", max_length=256)
+    description = discord.ui.TextInput(
+        label="Description", style=discord.TextStyle.paragraph, max_length=2000,
+        placeholder="Use \\n for line breaks", required=False,
+    )
+    color = discord.ui.TextInput(label="Color (hex, optional)", placeholder="#5865F2", required=False, max_length=7)
+    msg_type = discord.ui.TextInput(
+        label="Type: normal / unique / verify", default="normal", max_length=10, required=False
+    )
+
+    def __init__(self, cog: ReactionRole):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)  # channel.send below can be slow
+
+        type_value = (self.msg_type.value or "normal").strip().lower()
+        if type_value not in ("normal", "unique", "verify"):
+            await interaction.followup.send(
+                "❌ Type must be `normal`, `unique`, or `verify`.", ephemeral=True
+            )
+            return
+
+        if type_value == "unique":
+            content = f"{self.msg_title.value} {self.description.value}".lower()
+            if content in self.cog.unique_messages:
+                await interaction.followup.send(
+                    "❌ A unique message with this content already exists.", ephemeral=True
+                )
+                return
+            self.cog.unique_messages.add(content)
+
+        embed_color, valid = parse_color(self.color.value)
+        processed_desc = process_description(self.description.value)
+
+        if type_value == "verify":
+            embed = discord.Embed(title="🔐 " + self.msg_title.value, description=processed_desc, color=discord.Color.gold())
+            embed.set_footer(text="React to verify yourself")
+        else:
+            embed = discord.Embed(title=self.msg_title.value, description=processed_desc, color=embed_color)
+            embed.set_footer(text="React to get roles • Remove reaction to remove roles")
+
+        try:
+            message = await interaction.channel.send(embed=embed)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I can't send messages in this channel.", ephemeral=True)
+            return
+
+        self.cog.reaction_roles[message.id] = {
+            "reactions": {},
+            "type": type_value,
+            "channel_id": interaction.channel.id,
+            "title": self.msg_title.value,
+            "description": self.description.value,
+            "color": self.color.value,
+        }
+        self.cog.save_reaction_roles()
+
+        note = "" if valid else "\n⚠️ Invalid color format — used default blue instead."
+        await interaction.followup.send(
+            f"✅ Created! Message ID `{message.id}`. Use **Manage Existing** to add role mappings.{note}",
+            ephemeral=True,
+        )
+
+
+class EditMessageModal(discord.ui.Modal, title="Edit Reaction Role Message"):
+    def __init__(self, cog: ReactionRole, message_id: int, data: dict):
+        super().__init__()
+        self.cog = cog
+        self.message_id = message_id
+        self.msg_title = discord.ui.TextInput(label="Title", default=data.get("title", ""), max_length=256, required=False)
+        self.description = discord.ui.TextInput(
+            label="Description", style=discord.TextStyle.paragraph, max_length=2000,
+            default=data.get("description", ""), required=False,
+        )
+        self.color = discord.ui.TextInput(label="Color (hex)", default=data.get("color") or "", required=False, max_length=7)
+        self.add_item(self.msg_title)
+        self.add_item(self.description)
+        self.add_item(self.color)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)  # fetch/edit below can be slow
+
+        data = self.cog.reaction_roles.get(self.message_id)
+        if not data:
+            await interaction.followup.send("❌ This message is no longer tracked.", ephemeral=True)
+            return
+
+        channel = self.cog.bot.get_channel(data.get("channel_id"))
+        if not channel:
+            await interaction.followup.send("❌ Channel not found.", ephemeral=True)
+            return
+        try:
+            message = await channel.fetch_message(self.message_id)
+        except (discord.NotFound, discord.Forbidden):
+            await interaction.followup.send("❌ Couldn't fetch the original message.", ephemeral=True)
+            return
+
+        old_embed = message.embeds[0] if message.embeds else discord.Embed()
+        new_embed = discord.Embed()
+        new_embed.title = self.msg_title.value or old_embed.title
+        new_embed.description = process_description(self.description.value) if self.description.value else old_embed.description
+
+        new_color, valid = parse_color(self.color.value, default=old_embed.color or discord.Color.blue())
+        new_embed.color = new_color
+        if old_embed.footer:
+            new_embed.set_footer(text=old_embed.footer.text)
+
+        await message.edit(embed=new_embed)
+
+        if self.msg_title.value:
+            data["title"] = self.msg_title.value
+        if self.description.value:
+            data["description"] = self.description.value
+        if self.color.value:
+            data["color"] = self.color.value
+        self.cog.save_reaction_roles()
+
+        note = "" if valid else "\n⚠️ Invalid color format — kept previous color."
+        embed = message_panel_embed(data, self.message_id, channel, interaction.guild)
+        await interaction.followup.send(f"✅ Updated.{note}", embed=embed, ephemeral=True)
+
+
+class AddRoleEmojiModal(discord.ui.Modal, title="Add Role Mapping — Step 1"):
+    emoji = discord.ui.TextInput(label="Emoji", placeholder="🎮 or a custom emoji", max_length=100)
+
+    def __init__(self, cog: ReactionRole, message_id: int):
+        super().__init__()
+        self.cog = cog
+        self.message_id = message_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = self.cog.reaction_roles.get(self.message_id)
+        if not data:
+            await interaction.response.send_message("❌ Message no longer tracked.", ephemeral=True)
+            return
+        if self.emoji.value in data.get("reactions", {}):
+            await interaction.response.send_message(f"❌ {self.emoji.value} is already used on this message.", ephemeral=True)
+            return
+
+        # Step 2: pick the role via a RoleSelect component (no network calls yet, safe to respond directly)
+        view = PickRoleView(self.cog, self.message_id, self.emoji.value)
+        await interaction.response.send_message(
+            f"Now pick which role {self.emoji.value} should grant:", view=view, ephemeral=True
+        )
+
+
+class PickRoleView(discord.ui.View):
+    def __init__(self, cog: ReactionRole, message_id: int, emoji: str):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.message_id = message_id
+        self.emoji = emoji
+
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Choose a role...")
+    async def role_select(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        # Defer immediately — fetch_message/add_reaction below can take longer
+        # than the 3s window Discord gives before the interaction token expires.
+        await interaction.response.defer()
+
+        role = select.values[0]
+        data = self.cog.reaction_roles.get(self.message_id)
+        if not data:
+            await interaction.edit_original_response(content="❌ Message no longer tracked.", view=None)
+            return
+
+        if role.position >= interaction.guild.me.top_role.position:
+            await interaction.edit_original_response(
+                content="❌ I can't manage that role — it's higher than my highest role.", view=None
+            )
+            return
+
+        channel = self.cog.bot.get_channel(data.get("channel_id"))
+        try:
+            message = await channel.fetch_message(self.message_id)
+            await message.add_reaction(self.emoji)
+        except (discord.HTTPException, discord.NotFound, discord.Forbidden):
+            await interaction.edit_original_response(content="❌ Couldn't add that reaction to the message.", view=None)
+            return
+
+        data["reactions"][self.emoji] = role.id
+        self.cog.save_reaction_roles()
+        await interaction.edit_original_response(
+            content=f"✅ {self.emoji} now grants {role.mention}.", view=None
+        )
+
 
 async def setup(bot):
     await bot.add_cog(ReactionRole(bot))
