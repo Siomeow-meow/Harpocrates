@@ -7,14 +7,11 @@ from db import load_blob, save_blob
 
 COLLECTION = "voice_channels"
 
-# Discord rate-limits channel renames (~2 per 10 min per channel), so auto
-# rename on presence changes needs a cooldown or it will silently 429.
-RENAME_COOLDOWN_SECONDS = 300  # 5 minutes between auto-renames of the same channel
+
+RENAME_COOLDOWN_SECONDS = 300
 
 
 def get_activity_display(activities):
-    """Return an (emoji, text) tuple describing the first meaningful activity,
-    or (None, None) if there isn't one."""
     if not activities:
         return None, None
 
@@ -365,20 +362,9 @@ class Voice(commands.Cog):
             )
 
     def save_temp_channels(self):
-        """Persist per-channel runtime state (e.g. auto_status toggle)."""
         pass
 
     def load_config(self):
-        """Load configuration from MongoDB.
-
-        Shape per guild:
-        {
-            "creators": {channel_id (int): {"name": str, "editable": bool}},
-            "order": [channel_id, ...]
-        }
-        No category_id is stored anymore because each creator channel can live
-        in ANY category and temp channels spawn in that same category.
-        """
         try:
             data = load_blob(COLLECTION)
             configs = {}
@@ -396,7 +382,6 @@ class Voice(commands.Cog):
             self.temp_channels_config = {}
 
     def save_config(self):
-        """Save configuration to MongoDB"""
         try:
             json_data = {}
             for guild_id, config in self.temp_channels_config.items():
@@ -413,9 +398,6 @@ class Voice(commands.Cog):
             print(f"[ERROR] Failed to save config: {e}")
 
     async def find_existing_creator_channel(self, guild, name: str):
-        """Look for an existing 'Join to Create' channel that matches the
-        given name (case-insensitive, trimmed). Used so re-running /setup_vc
-        with the same name doesn't create duplicates."""
         target = name.strip().lower()
         for channel in guild.voice_channels:
             if channel.name.strip().lower() == target:
@@ -438,7 +420,7 @@ class Voice(commands.Cog):
         config = self.temp_channels_config.setdefault(guild.id, {"creators": {}, "order": []})
         creators = config["creators"]
 
-        # Don't create a duplicate creator channel with the same name.
+
         for cid, data in creators.items():
             existing = guild.get_channel(cid)
             if existing and data.get("name", "").lower() == name.lower():
@@ -448,9 +430,7 @@ class Voice(commands.Cog):
                 )
                 return
 
-        # Auto-detect a pre-existing channel with that name and adopt it,
-        # instead of creating a duplicate. This mirrors the JSON version's
-        # "reuse if present" behavior.
+
         existing_channel = await self.find_existing_creator_channel(guild, name)
         if existing_channel:
             creators[existing_channel.id] = {"name": existing_channel.name, "editable": editable}
@@ -463,8 +443,7 @@ class Voice(commands.Cog):
             )
             return
 
-        # Create a fresh creator channel. No forced category - it goes to
-        # the top level, and admins can drag it into any category they like.
+
         vc = await guild.create_voice_channel(name)
         creators[vc.id] = {"name": name, "editable": editable}
         config["order"].append(vc.id)
@@ -481,9 +460,6 @@ class Voice(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Prune config entries whose Discord objects are gone. Never
-        recreates or deletes anything - if you move or delete a channel
-        yourself, it stays exactly how you left it."""
         print(f"[INFO] Bot is ready. Verifying {len(self.temp_channels_config)} guild configurations...")
 
         for guild_id, config in list(self.temp_channels_config.items()):
@@ -517,7 +493,7 @@ class Voice(commands.Cog):
 
         creators = guild_config.get("creators", {})
 
-        # User joined one of this guild's creator channels
+
         if after.channel and after.channel.id in creators:
             try:
                 member = await member.guild.fetch_member(member.id)
@@ -525,8 +501,8 @@ class Voice(commands.Cog):
                 pass
 
             creator_channel = after.channel
-            # Temp channel spawns in whatever category the creator channel is
-            # currently in - no forced category.
+
+
             category = creator_channel.category
 
             channel_name = format_activity_channel_name(member.activities, f"{member.name}'s channel")
@@ -569,7 +545,7 @@ class Voice(commands.Cog):
             except Exception as e:
                 print(f"[ERROR] Failed to send control message: {e}")
 
-        # Clean up empty temp channels
+
         channel_ids_to_check = list(self.temp_channels.keys())
 
         for channel_id in channel_ids_to_check:
@@ -639,8 +615,6 @@ class Voice(commands.Cog):
     @app_commands.command(name="remove_vc", description="Remove the most recently created Join To Create channel")
     @app_commands.default_permissions(administrator=True)
     async def remove_voice(self, interaction: discord.Interaction):
-        """Removes exactly one Join To Create channel per call, LIFO: the
-        last one you created is the first one this removes."""
         config = self.temp_channels_config.get(interaction.guild.id)
         order = config.get("order", []) if config else []
         if not config or not order:
@@ -675,7 +649,7 @@ class Voice(commands.Cog):
         self.save_config()
 
         if not deleted_channel:
-            msg = "✅ Untracked it. It looks like it was already deleted on Discord." if not failed else \
+            msg = "✅ Untracked it. It looks like it was already deleted on Discord." if not failed else\
                   "⚠️ Untracked it, but I don't have permission to delete it on Discord."
             await interaction.followup.send(msg, ephemeral=True)
             return

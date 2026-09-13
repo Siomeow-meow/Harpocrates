@@ -14,7 +14,7 @@ SERVERID = int(os.environ["SERVERID"])
 
 import db
 
-# Prevent __pycache__ generation
+
 sys.dont_write_bytecode = True
 
 
@@ -34,13 +34,12 @@ class MyBot(commands.Bot):
         self.twitch_platform = None
         self.synced_guilds = set()
 
-        # Data now lives in MongoDB (see db.py) — no local data/ folder needed.
 
     def _setup_logger(self):
         logger = logging.getLogger('discord.bot')
         logger.setLevel(logging.INFO)
 
-        # Prevent duplicate handlers
+
         if not logger.handlers:
             handler = logging.StreamHandler()
             handler.setFormatter(
@@ -51,7 +50,6 @@ class MyBot(commands.Bot):
         return logger
 
     async def setup_hook(self):
-        """Setup all cogs when bot starts"""
         self.logger.info("Starting bot setup...")
 
         try:
@@ -61,7 +59,7 @@ class MyBot(commands.Bot):
             self.logger.error(f"Could not connect to MongoDB: {e}")
             raise
 
-        # 1. Loads platform modules
+
         self.logger.info("Loading platform modules...")
 
         try:
@@ -78,7 +76,7 @@ class MyBot(commands.Bot):
         except Exception as e:
             self.logger.error(f"❌ Failed to load Twitch platform: {e}")
 
-        # 2. Loads all cogs
+
         cogs_to_load = [
             'voice',
             'help',
@@ -94,14 +92,15 @@ class MyBot(commands.Bot):
             except Exception as e:
                 self.logger.error(f"❌ Failed to load cog {cog_name}: {e}")
 
+
         await self.register_platforms()
+
 
         await self.auto_sync_commands()
 
         self.logger.info("=" * 50)
 
     async def auto_sync_commands(self):
-        """Sync slash commands safely after cleanup"""
         guild_id = SERVERID
 
         if guild_id in self.synced_guilds:
@@ -112,6 +111,7 @@ class MyBot(commands.Bot):
 
         try:
             guild = discord.Object(id=guild_id)
+
 
             self.tree.copy_global_to(guild=guild)
 
@@ -127,7 +127,6 @@ class MyBot(commands.Bot):
             self.logger.error(f"❌ Failed to sync commands: {e}")
 
     async def register_platforms(self):
-        """Register platforms with creator-videos cog"""
         creator_cog = self.get_cog('CreatorVideos')
 
         if not creator_cog:
@@ -149,9 +148,6 @@ class MyBot(commands.Bot):
         self.logger.info(f"✅ Connected to {len(self.guilds)} guild(s)")
 
 
-# ─────────────────────────────────────────────
-# Global slash-command error handler
-# ─────────────────────────────────────────────
 async def on_app_command_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.CommandSignatureMismatch):
         await interaction.response.send_message(

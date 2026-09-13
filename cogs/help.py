@@ -6,36 +6,34 @@ from discord.ui import Select, View
 class HelpCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        
+
     def get_command_categories(self):
-        """Organize commands by their cogs, excluding HelpCog"""
         categories = {}
-        
+
         for command in self.bot.tree.walk_commands():
             if command.name == "help":
                 continue
-            
+
             cog = command.binding
             if cog is None:
                 cog_name = "General"
             else:
                 cog_name = cog.__class__.__name__
-                
+
             if cog_name == "HelpCog":
                 continue
-                
+
             if cog_name not in categories:
                 categories[cog_name] = {
                     'cog': cog,
                     'commands': []
                 }
-            
+
             categories[cog_name]['commands'].append(command)
-        
+
         return categories
-    
+
     def get_category_emoji(self, category_name):
-        """Get appropriate emojis for each category"""
         emojis = {
             "CreatorVideos": "🎥",
             "ReactionRole": "🎭",
@@ -44,9 +42,8 @@ class HelpCog(commands.Cog):
             "General": "📝"
         }
         return emojis.get(category_name, "📝")
-    
+
     def get_category_description(self, category_name):
-        """Get descriptions for each category"""
         descriptions = {
             "CreatorVideos": "Manage YouTube creator notifications and automatic role assignments",
             "ReactionRole": "Manage automatic role assignment through reactions",
@@ -55,62 +52,60 @@ class HelpCog(commands.Cog):
             "General": "Miscellaneous commands"
         }
         return descriptions.get(category_name)
-    
+
     def create_category_embed(self, category_name, commands_data):
-        """Create an embed for a specific category"""
         cog = commands_data['cog']
         commands = commands_data['commands']
         emoji = self.get_category_emoji(category_name)
         description = self.get_category_description(category_name)
-        
+
         embed = discord.Embed(
             title=f"{emoji} {category_name} Commands",
             color=discord.Color.blurple(),
             description=description or "Various commands for this category"
         )
-        
+
         for command in commands:
             embed.add_field(
                 name=f"`/{command.name}`",
                 value=command.description or "No description available",
                 inline=False
             )
-        
+
         if hasattr(cog, 'help_footer'):
             embed.set_footer(text=cog.help_footer)
         else:
             embed.set_footer(text=f"Total commands: {len(commands)}")
-        
+
         return embed
 
     @app_commands.command(name="help", description="Show all available commands with category selection")
     async def help_command(self, interaction: discord.Interaction):
-        """Main help command with dropdown menu"""
         categories = self.get_command_categories()
-        
+
         if not categories:
             await interaction.response.send_message("No commands available.", ephemeral=True)
             return
-        
-        # Create initial embed showing all categories
+
+
         embed = discord.Embed(
             title="📚 Command Help Menu",
             color=discord.Color.blurple(),
             description="Select a category from the dropdown below to view specific commands.\n\n"
                         f"**Available Categories ({len(categories)}):**\n" +
-                       "\n".join([f"• {self.get_category_emoji(name)} **{name}** - {self.get_category_description(name) or 'Various commands'}" 
+                       "\n".join([f"• {self.get_category_emoji(name)} **{name}** - {self.get_category_description(name) or 'Various commands'}"
                                 for name in sorted(categories.keys())])
         )
         embed.set_footer(text="Select a category from the dropdown menu below")
-        
-        # Create dropdown options
+
+
         options = []
         for category_name in sorted(categories.keys()):
             emoji = self.get_category_emoji(category_name)
             description = self.get_category_description(category_name) or "Various commands"
-            # Shorten description for dropdown option
+
             short_desc = description[:50] + "..." if len(description) > 50 else description
-            
+
             options.append(
                 discord.SelectOption(
                     label=category_name,
@@ -119,8 +114,8 @@ class HelpCog(commands.Cog):
                     emoji=emoji
                 )
             )
-        
-        # Create dropdown
+
+
         class HelpDropdown(Select):
             def __init__(self, categories, help_cog):
                 self.categories = categories
@@ -131,37 +126,37 @@ class HelpCog(commands.Cog):
                     min_values=1,
                     max_values=1
                 )
-            
+
             async def callback(self, interaction: discord.Interaction):
                 selected_category = self.values[0]
                 embed = self.help_cog.create_category_embed(selected_category, self.categories[selected_category])
-                # Edit the ephemeral message
+
                 await interaction.response.edit_message(embed=embed, view=self.view)
-        
-        # Create view with dropdown
+
+
         class HelpView(View):
             def __init__(self, categories, help_cog):
                 super().__init__(timeout=180)
                 self.categories = categories
                 self.help_cog = help_cog
                 self.add_item(HelpDropdown(categories, help_cog))
-            
+
             async def on_timeout(self):
-                # Disable the dropdown when timeout occurs
+
                 for item in self.children:
                     item.disabled = True
-                # Try to edit the message if possible
+
                 try:
                     await self.message.edit(view=self)
                 except:
                     pass
-        
+
         view = HelpView(categories, self)
-        
-        # Send the initial response as ephemeral
+
+
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        
-        # Store message reference in the view
+
+
         view.message = await interaction.original_response()
 
 async def setup(bot):

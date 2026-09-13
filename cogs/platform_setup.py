@@ -1,13 +1,3 @@
-# cogs/platform_setup.py
-"""
-Platform setup, now driven by a single slash command that opens an
-interactive panel (dropdown + buttons + modal) instead of three separate
-slash commands the user had to remember (setup_platform / list_platforms /
-remove_platform).
-
-Requires discord.py >= 2.3 (for discord.ui.Select in decorator form).
-"""
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -29,7 +19,6 @@ def get_platform_instance(bot, platform: str):
 
 
 async def build_platforms_embed(bot, guild_id: str) -> discord.Embed:
-    """Same content /list_platforms used to show, reused by the panel + Refresh button."""
     configured = []
 
     if bot.youtube_platform and bot.youtube_platform.is_configured(guild_id):
@@ -68,7 +57,7 @@ class PlatformSetupModal(discord.ui.Modal, title="Platform Setup"):
         self.bot = bot
         self.platform = platform
         self.dashboard_message = dashboard_message
-        # Twitch needs the secret field; make that obvious without hard-blocking submit.
+
         if platform == "twitch":
             self.secret_key.label = "Client Secret (required for Twitch)"
 
@@ -100,7 +89,7 @@ class PlatformSetupModal(discord.ui.Modal, title="Platform Setup"):
             if self.platform not in self.bot.configured_platforms[guild_id]:
                 self.bot.configured_platforms[guild_id].append(self.platform)
 
-            # Refresh the original panel embed in place, if we have it.
+
             if self.dashboard_message:
                 try:
                     embed = await build_platforms_embed(self.bot, guild_id)
@@ -115,7 +104,7 @@ class PlatformDashboard(discord.ui.View):
         self.bot = bot
         self.guild_id = guild_id
         self.selected_platform = None
-        self.message: discord.Message = None  # set after sending, so buttons can refresh it
+        self.message: discord.Message = None
 
     @discord.ui.select(placeholder="Choose a platform...", options=PLATFORM_OPTIONS)
     async def platform_select(self, interaction: discord.Interaction, select: discord.ui.Select):
@@ -179,7 +168,6 @@ class PlatformDashboard(discord.ui.View):
 
 
 class PlatformSetup(commands.Cog):
-    """Universal platform setup cog, driven by one panel command."""
 
     def __init__(self, bot):
         self.bot = bot

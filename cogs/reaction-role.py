@@ -7,7 +7,6 @@ from db import load_blob, save_blob
 COLLECTION = "reaction_roles"
 
 
-
 def load_reaction_roles():
     try:
         data = load_blob(COLLECTION)
@@ -42,7 +41,6 @@ def parse_color(color: str, default=None):
         return default, False
 
 
-
 class ReactionRole(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -51,7 +49,6 @@ class ReactionRole(commands.Cog):
         self._load_unique_messages()
         self.bot.loop.create_task(self.initialize_reactions())
 
-    # ---------- persistence helpers ----------
 
     def _load_unique_messages(self):
         for data in self.reaction_roles.values():
@@ -70,7 +67,6 @@ class ReactionRole(commands.Cog):
             print(f"❌ Critical error saving reaction roles: {e}")
             return False
 
-    # ---------- startup reaction restore (unchanged) ----------
 
     async def initialize_reactions(self):
         await self.bot.wait_until_ready()
@@ -140,7 +136,6 @@ class ReactionRole(commands.Cog):
             del self.reaction_roles[message_id]["reactions"][emoji]
             self.save_reaction_roles()
 
-    # ---------- reaction listeners (unchanged behavior) ----------
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload):
@@ -211,7 +206,6 @@ class ReactionRole(commands.Cog):
             except discord.HTTPException as e:
                 print(f"❌ Error removing role: {e}")
 
-    # ---------- the ONE slash command ----------
 
     @app_commands.command(name="reactionroles", description="Open the reaction roles dashboard")
     async def reactionroles(self, interaction: discord.Interaction):
@@ -223,8 +217,6 @@ class ReactionRole(commands.Cog):
         view = DashboardView(self)
         embed = dashboard_embed(self, interaction.guild)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-
 
 
 def dashboard_embed(cog: ReactionRole, guild: discord.Guild) -> discord.Embed:
@@ -260,7 +252,6 @@ def message_panel_embed(data: dict, message_id: int, channel: discord.abc.GuildC
     else:
         embed.add_field(name="Role Mappings", value="No roles configured yet.", inline=False)
     return embed
-
 
 
 class DashboardView(discord.ui.View):
@@ -345,7 +336,6 @@ class DashboardView(discord.ui.View):
             await interaction.response.send_message(f"❌ Backup failed: {e}", ephemeral=True)
 
 
-
 class SelectMessageView(discord.ui.View):
     def __init__(self, cog: ReactionRole, server_messages):
         super().__init__(timeout=180)
@@ -372,7 +362,6 @@ class SelectMessageView(discord.ui.View):
         embed = message_panel_embed(data, message_id, channel, interaction.guild)
         view = MessagePanelView(self.cog, message_id)
         await interaction.response.edit_message(content=None, embed=embed, view=view)
-
 
 
 class MessagePanelView(discord.ui.View):
@@ -431,7 +420,7 @@ class RemoveRoleView(discord.ui.View):
         self.add_item(self.select)
 
     async def on_select(self, interaction: discord.Interaction):
-        await interaction.response.defer()  # clear_reaction below can be slow
+        await interaction.response.defer()
 
         emoji = self.select.values[0]
         data = self.cog.reaction_roles.get(self.message_id)
@@ -460,7 +449,7 @@ class ConfirmDeleteView(discord.ui.View):
 
     @discord.ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()  # fetch_message/delete below can be slow
+        await interaction.response.defer()
 
         data = self.cog.reaction_roles.get(self.message_id)
         if not data:
@@ -498,7 +487,6 @@ class ConfirmDeleteView(discord.ui.View):
         await interaction.response.edit_message(content="Cancelled.", view=None)
 
 
-# MODALS
 class CreateMessageModal(discord.ui.Modal, title="Create Reaction Role Message"):
     msg_title = discord.ui.TextInput(label="Title", max_length=256)
     description = discord.ui.TextInput(
@@ -515,7 +503,7 @@ class CreateMessageModal(discord.ui.Modal, title="Create Reaction Role Message")
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)  # channel.send below can be slow
+        await interaction.response.defer(ephemeral=True)
 
         type_value = (self.msg_type.value or "normal").strip().lower()
         if type_value not in ("normal", "unique", "verify"):
@@ -582,7 +570,7 @@ class EditMessageModal(discord.ui.Modal, title="Edit Reaction Role Message"):
         self.add_item(self.color)
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)  # fetch/edit below can be slow
+        await interaction.response.defer(ephemeral=True)
 
         data = self.cog.reaction_roles.get(self.message_id)
         if not data:
@@ -641,7 +629,7 @@ class AddRoleEmojiModal(discord.ui.Modal, title="Add Role Mapping — Step 1"):
             await interaction.response.send_message(f"❌ {self.emoji.value} is already used on this message.", ephemeral=True)
             return
 
-        # Step 2: pick the role via a RoleSelect component (no network calls yet, safe to respond directly)
+
         view = PickRoleView(self.cog, self.message_id, self.emoji.value)
         await interaction.response.send_message(
             f"Now pick which role {self.emoji.value} should grant:", view=view, ephemeral=True
@@ -657,8 +645,8 @@ class PickRoleView(discord.ui.View):
 
     @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Choose a role...")
     async def role_select(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
-        # Defer immediately — fetch_message/add_reaction below can take longer
-        # than the 3s window Discord gives before the interaction token expires.
+
+
         await interaction.response.defer()
 
         role = select.values[0]

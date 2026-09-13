@@ -1,4 +1,3 @@
-# cogs/creator-videos.py
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -9,22 +8,21 @@ import asyncio
 from db import load_blob, save_blob
 
 COLLECTION = "tracked_channels"
-CACHE_DURATION = 15 * 60  # 15 minutes
+CACHE_DURATION = 15 * 60
 
 class CreatorVideos(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.platforms = {}  # Will store platform instances
+        self.platforms = {}
         self.cache = {}
-        self.tracked_channels = self.load_tracked_channels()  # Load into instance
-        
-        # Track initialization state
+        self.tracked_channels = self.load_tracked_channels()
+
+
         self.initialized = False
-        
+
         self.check_uploads.start()
-    
+
     def load_tracked_channels(self):
-        """Load existing tracked channels or create empty dict"""
         try:
             data = load_blob(COLLECTION)
             if not data:
@@ -35,7 +33,6 @@ class CreatorVideos(commands.Cog):
             return {}
 
     def save_tracked_channels(self):
-        """Save current tracking data to MongoDB"""
         try:
             success = save_blob(COLLECTION, self.tracked_channels)
             if not success:
@@ -44,31 +41,28 @@ class CreatorVideos(commands.Cog):
         except Exception as e:
             print(f"❌ Error saving tracked channels: {e}")
             return False
-    
+
     def register_platform(self, platform_name, platform_instance):
-        """Register a platform instance"""
         self.platforms[platform_name.lower()] = platform_instance
         print(f"✅ Registered platform: {platform_name}")
-    
+
     def get_platform(self, platform_name):
-        """Get platform instance by name"""
         return self.platforms.get(platform_name.lower())
-    
+
     def cog_unload(self):
         self.check_uploads.cancel()
-    
+
     async def restore_roles_on_startup(self):
-        """Restore roles to users when bot starts up"""
         print("Restoring roles on startup...")
         for creator_key, data in list(self.tracked_channels.items()):
             user_id = data.get("user_id")
             role_id = data.get("role_id")
-            
+
             if user_id and role_id:
                 for guild in self.bot.guilds:
                     user = guild.get_member(user_id)
                     role = guild.get_role(role_id)
-                    
+
                     if user and role:
                         try:
                             if role not in user.roles:
@@ -78,22 +72,19 @@ class CreatorVideos(commands.Cog):
                             print(f"Missing permissions to restore role for {user.display_name}")
                         except Exception as e:
                             print(f"Error restoring role: {e}")
-    
+
     def clean_description(self, description: str) -> str:
-        """Remove embeddable links from description"""
         if not description:
             return ""
         return re.sub(r'(https?://\S+)', lambda m: f'<{m.group(1)}>', description)
-    
+
     def is_cache_valid(self, cache_timestamp):
-        """Check if cache is still valid"""
         if not cache_timestamp:
             return False
         return (time.time() - cache_timestamp) < CACHE_DURATION
-    
+
     @tasks.loop(minutes=30)
     async def check_uploads(self):
-        """Check for new content from tracked channels"""
         if not self.tracked_channels:
             return
 
@@ -105,10 +96,10 @@ class CreatorVideos(commands.Cog):
             platform_name = data.get("platform")
             guild_id = data.get("guild_id")
             discord_channel_id = data.get("discord_channel_id")
-            
+
             if not guild_id or not discord_channel_id:
                 continue
-            
+
             discord_channel = self.bot.get_channel(discord_channel_id)
             if not discord_channel:
                 continue
@@ -118,18 +109,18 @@ class CreatorVideos(commands.Cog):
                 if not platform:
                     print(f"❌ Platform {platform_name} not found for creator {creator_key}")
                     continue
-                
+
                 creator_id = data.get("creator_id")
                 if not creator_id:
                     continue
-                
+
                 if platform_name == "youtube":
                     latest_video = await platform.get_latest_content(creator_id, guild_id)
                     if not latest_video:
                         continue
 
                     video_id = latest_video["id"]["videoId"]
-                    
+
                     if "last_content_id" in data and data["last_content_id"] == video_id:
                         continue
 
@@ -138,87 +129,78 @@ class CreatorVideos(commands.Cog):
 
                     video_url = f"https://youtube.com/watch?v={video_id}"
                     description = await platform.get_content_description(video_id, guild_id) or "No description available"
-                    
-                    # Use platform's clean_description if available
+
+
                     if hasattr(platform, 'clean_description'):
                         description = platform.clean_description(description)
                     else:
                         description = self.clean_description(description)
-                    
+
                     channel_title = latest_video['snippet']['channelTitle']
                     if latest_video["snippet"].get("liveBroadcastContent") == "live":
                         message = f"🎥 **{channel_title} is LIVE on YouTube!**\n\n{description}\n\n{video_url}"
                     else:
                         message = f"🎥 New video from **{channel_title} on YouTube!**\n\n{description}\n\n{video_url}"
-                    
+
                     await discord_channel.send(message)
-                
+
                 elif platform_name == "twitch":
                     stream_info = await platform.get_latest_content(creator_id, guild_id)
                     if stream_info:
-                        # Channel is live
+
                         stream_id = stream_info["id"]
-                        
+
                         if "last_content_id" in data and data["last_content_id"] == stream_id:
                             continue
-                        
+
                         self.tracked_channels[creator_key]["last_content_id"] = stream_id
                         self.save_tracked_channels()
-                        
+
                         stream_url = f"https://twitch.tv/{data.get('creator_input', '').lstrip('@')}"
                         title = stream_info["title"]
                         game_name = stream_info.get("game_name", "Unknown Game")
                         viewer_count = stream_info.get("viewer_count", 0)
-                        
+
                         message = f"🟣 **{data.get('creator_name', 'Unknown')} is LIVE on Twitch!**\n\n"
                         message += f"**Playing:** {game_name}\n"
                         message += f"**Title:** {title}\n"
                         message += f"**Viewers:** {viewer_count}\n\n"
                         message += stream_url
-                        
+
                         await discord_channel.send(message)
                     else:
-                        # Channel went offline
+
                         if "last_content_id" in data:
                             self.tracked_channels[creator_key]["last_content_id"] = None
                             self.save_tracked_channels()
-                
-                # Add more platforms here as needed
-                
+
+
             except Exception as e:
                 print(f"Error checking {platform_name} creator {creator_key}: {e}")
-    
+
     @check_uploads.before_loop
     async def before_check_uploads(self):
-        """Initialize before starting the loop"""
         await self.bot.wait_until_ready()
-        
+
         await self.restore_roles_on_startup()
-        
-        # Initialize last content IDs
+
+
         for creator_key, data in list(self.tracked_channels.items()):
             platform_name = data.get("platform")
             guild_id = data.get("guild_id")
             creator_id = data.get("creator_id")
-            
+
             if platform_name and guild_id and creator_id:
                 platform = self.get_platform(platform_name)
                 if platform and platform_name == "youtube":
                     latest_video = await platform.get_latest_content(creator_id, guild_id)
                     if latest_video:
                         self.tracked_channels[creator_key]["last_content_id"] = latest_video["id"]["videoId"]
-        
+
         self.save_tracked_channels()
-    
-    # ========== CREATOR TRACKING COMMANDS ==========
-    # ========== CREATOR TRACKING PANEL ==========
-    # Everything below replaces the old /follow /unfollow /show_creators
-    # /check_creator slash commands with a single /creators panel:
-    # a platform dropdown + Follow / Unfollow / List / Check buttons,
-    # with modals and channel/role pickers for the actual inputs.
+
 
     def configured_platform_options(self, guild_id: int):
-        """Only show platforms that are actually set up for this server."""
         options = []
         if self.bot.youtube_platform and self.bot.youtube_platform.is_configured(guild_id):
             options.append(discord.SelectOption(label="YouTube", value="youtube", emoji="🎥"))
@@ -227,7 +209,6 @@ class CreatorVideos(commands.Cog):
         return options
 
     def build_creators_embed(self, guild: discord.Guild) -> discord.Embed:
-        """Same content /show_creators used to render, reused by the panel + List button."""
         guild_tracked = {k: v for k, v in self.tracked_channels.items()
                           if v.get("guild_id") == guild.id}
 
@@ -271,7 +252,6 @@ class CreatorVideos(commands.Cog):
         return embed
 
     async def find_creator_key(self, guild_id: int, platform: str, creator: str, channel_id: int = None):
-        """Look up a tracked creator by platform + handle (+ optional discord channel)."""
         for key, data in self.tracked_channels.items():
             if (data.get("platform") == platform
                     and data.get("creator_input", "").lower() == creator.lower()
@@ -280,12 +260,10 @@ class CreatorVideos(commands.Cog):
                 return key
         return None
 
-    # ---------- FOLLOW ----------
 
     async def do_follow(self, interaction: discord.Interaction, creator: str, platform: str,
                          target_channel: discord.TextChannel, user: discord.Member = None,
                          role: discord.Role = None):
-        """Core follow logic, shared by the panel wizard. Assumes interaction already deferred."""
         guild_id = interaction.guild.id
 
         platform_instance = self.get_platform(platform)
@@ -411,10 +389,8 @@ class CreatorVideos(commands.Cog):
 
         await interaction.followup.send(success_message, ephemeral=True)
 
-    # ---------- UNFOLLOW ----------
 
     async def do_unfollow(self, interaction: discord.Interaction, creator_key: str):
-        """Core unfollow logic given an already-resolved creator_key. Assumes interaction deferred."""
         data = self.tracked_channels[creator_key]
         user_id = data.get("user_id")
         role_id = data.get("role_id")
@@ -443,10 +419,8 @@ class CreatorVideos(commands.Cog):
         else:
             await interaction.followup.send(f"✅ Stopped tracking **{creator_name}** on {platform}.", ephemeral=True)
 
-    # ---------- CHECK ----------
 
     async def do_check(self, interaction: discord.Interaction, creator: str, platform: str):
-        """Manual latest-content check, posted into interaction.channel. Assumes interaction deferred."""
         guild_id = interaction.guild.id
 
         platform_instance = self.get_platform(platform)
@@ -534,8 +508,6 @@ class CreatorVideos(commands.Cog):
         view.message = await interaction.original_response()
 
 
-# ========================= UI COMPONENTS =========================
-
 class CreatorHandleModal(discord.ui.Modal, title="Creator handle"):
     creator = discord.ui.TextInput(
         label="Creator @handle or ID",
@@ -548,11 +520,11 @@ class CreatorHandleModal(discord.ui.Modal, title="Creator handle"):
         super().__init__()
         self.cog = cog
         self.platform = platform
-        self.on_submit_action = on_submit_action  # "follow" | "unfollow" | "check"
+        self.on_submit_action = on_submit_action
 
     async def on_submit(self, interaction: discord.Interaction):
         if self.on_submit_action == "follow":
-            # Next step: pick a notification channel + optional user/role.
+
             view = FollowOptionsView(self.cog, self.platform, self.creator.value)
             await interaction.response.send_message(
                 f"Following **{self.creator.value}** on {PLATFORM_LABEL.get(self.platform, self.platform)}.\n"
@@ -578,7 +550,7 @@ class CreatorHandleModal(discord.ui.Modal, title="Creator handle"):
             if len(matches) == 1:
                 await self.cog.do_unfollow(interaction, matches[0][0])
             else:
-                # Tracked in more than one channel — let the user pick which.
+
                 view = UnfollowPickView(self.cog, matches)
                 await interaction.followup.send(
                     f"**{self.creator.value}** is tracked in multiple channels — pick which to stop:",
@@ -594,7 +566,6 @@ PLATFORM_LABEL = {"youtube": "🎥 YouTube", "twitch": "🟣 Twitch"}
 
 
 class FollowOptionsView(discord.ui.View):
-    """Second step of the Follow wizard: pick a channel, and optionally a user + role."""
 
     def __init__(self, cog: "CreatorVideos", platform: str, creator: str):
         super().__init__(timeout=180)
@@ -608,8 +579,8 @@ class FollowOptionsView(discord.ui.View):
     @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="Notification channel (defaults to here)",
                        channel_types=[discord.ChannelType.text], min_values=0, max_values=1)
     async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        # ChannelSelect gives back a lightweight AppCommandChannel; resolve it to a
-        # real discord.TextChannel so permissions_for/.mention/etc. work downstream.
+
+
         if select.values:
             raw = select.values[0]
             resolved = interaction.guild.get_channel(raw.id)
@@ -658,7 +629,6 @@ class FollowOptionsView(discord.ui.View):
 
 
 class UnfollowPickView(discord.ui.View):
-    """Shown when a creator handle matches more than one tracked entry (e.g. multiple channels)."""
 
     def __init__(self, cog: "CreatorVideos", matches):
         super().__init__(timeout=120)
